@@ -1,0 +1,19 @@
+{
+  "name": "trade-agent",
+  "version": "1.0.0",
+  "description": "Private autonomous AI trading agent — Bitget CEX, multi-agent pipeline, technical scanner",
+  "main": "index.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs",
+    "dev": "node --watch index.mjs"
+  },
+  "private": true,
+  "dependencies": {
+    "@lifi/sdk": "^3.16.3",
+    "better-sqlite3": "^12.8.0",
+    "express": "^5.1.0",
+    "viem": "^2.47.6",
+    "ws": "^8.20.0"
+  }
+}

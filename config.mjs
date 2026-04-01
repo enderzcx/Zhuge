@@ -1,0 +1,85 @@
+import { readFileSync } from 'fs';
+
+export function createConfig() {
+  // --- Env ---
+  const envLines = readFileSync('.env', 'utf-8').split('\n');
+  for (const line of envLines) {
+    const [k, ...v] = line.split('=');
+    if (k && v.length) process.env[k.trim()] = v.join('=').trim();
+  }
+
+  const PORT = process.env.PORT || 3200;
+  const CRUCIX = process.env.CRUCIX_URL || 'http://localhost:3117';
+  const LLM_BASE = process.env.LLM_BASE_URL || 'http://localhost:8080/v1';
+  const LLM_MODEL = process.env.LLM_MODEL || 'gpt-5.4-mini-low-fast';
+  const LLM_KEY = process.env.LLM_API_KEY || 'pwd';
+  const NEWS_TOKEN = process.env.OPENNEWS_TOKEN;
+  const NEWS_API = 'https://ai.6551.io';
+  const AUTO_TRADE_URL = process.env.AUTO_TRADE_URL || '';
+  const AUTO_TRADE_SECRET = process.env.AUTO_TRADE_SECRET || 'rifi-auto-2026';
+
+  // --- Bitget CEX ---
+  const BITGET_API_KEY = process.env.BITGET_API_KEY || '';
+  const BITGET_SECRET = process.env.BITGET_SECRET_KEY || '';
+  const BITGET_PASS = process.env.BITGET_PASSPHRASE || '';
+  const BITGET_BASE = 'https://api.bitget.com';
+
+  // Per-agent model allocation
+  const AGENT_MODELS = {
+    analyst:    process.env.LLM_MODEL_ANALYST    || 'gpt-5.4-mini',
+    risk:       process.env.LLM_MODEL_RISK       || 'gpt-5.4-mini',
+    strategist: process.env.LLM_MODEL_STRATEGIST || 'gpt-5.4-mini',
+    executor:   process.env.LLM_MODEL_EXECUTOR   || 'gpt-5.4-mini-low-fast',
+    reviewer:   process.env.LLM_MODEL_REVIEWER   || 'gpt-5.4-mini',
+  };
+
+  // --- LiFi Cross-Chain ---
+  const LIFI_DIAMOND = '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE';
+  const SESSION_MANAGER_V2 = '0x342168e8D2BF8315BbF72F409A94f1EC7570f611';
+
+  const CHAIN_MAP = { base: 8453, ethereum: 1, bsc: 56 };
+  const CHAIN_OBJECTS = { 8453: 'base', 1: 'mainnet', 56: 'bsc' };
+
+  const TOKEN_REGISTRY = {
+    'USDC:8453': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    'USDC:1': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    'USDC:56': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
+    'WETH:8453': '0x4200000000000000000000000000000000000006',
+    'WETH:1': '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+    'ETH:8453': '0x0000000000000000000000000000000000000000',
+    'ETH:1': '0x0000000000000000000000000000000000000000',
+    'BNB:56': '0x0000000000000000000000000000000000000000',
+    // Ondo GM tokens — BSC (primary, cheap gas)
+    'AAPLon:56': '0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4',
+    'NVDAon:56': '0xa9ee28c80f960b889dfbd1902055218cba016f75',
+    'TSLAon:56': '0x2494b603319d4d9f9715c9f4496d9e0364b59d93',
+    'SPYon:56':  '0x6a708ead771238919d85930b5a0f10454e1c331a',
+    // Ondo GM tokens — Ethereum (expensive gas, backup)
+    'AAPLon:1': 'placeholder',
+    'NVDAon:1': 'placeholder',
+    'SPYon:1': 'placeholder',
+  };
+
+  const SM_V2_ABI = [
+    { type: 'function', name: 'executeCall', inputs: [{ name: 'user', type: 'address' }, { name: 'target', type: 'address' }, { name: 'spendAmount', type: 'uint256' }, { name: 'data', type: 'bytes' }], outputs: [{ name: 'result', type: 'bytes' }], stateMutability: 'nonpayable' },
+    { type: 'function', name: 'canExecute', inputs: [{ name: 'user', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ name: 'ok', type: 'bool' }, { name: 'reason', type: 'string' }], stateMutability: 'view' },
+    { type: 'function', name: 'isAllowedTarget', inputs: [{ name: 'target', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  ];
+
+  const PRICE_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
+  const ANOMALY_THRESHOLD = 0.02;  // 2% in 5min → instant analysis
+  const FLASH_THRESHOLD = 0.05;    // 5% in 5min → FLASH alert
+  const PRICE_WINDOW = 5 * 60 * 1000; // 5 min
+  const PATROL_INTERVAL = 12; // 12 * 15min = 3h
+  const WEEKLY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+  return {
+    PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API,
+    AUTO_TRADE_URL, AUTO_TRADE_SECRET,
+    BITGET_API_KEY, BITGET_SECRET, BITGET_PASS, BITGET_BASE,
+    AGENT_MODELS,
+    LIFI_DIAMOND, SESSION_MANAGER_V2, CHAIN_MAP, CHAIN_OBJECTS, TOKEN_REGISTRY, SM_V2_ABI,
+    PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
+    PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
+  };
+}

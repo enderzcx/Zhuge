@@ -1,0 +1,334 @@
+/**
+ * Pipeline: collectAndAnalyze, runFullAnalysis, patrol reports, auto-trade trigger.
+ * Extracted from vps-api-index.mjs lines ~1162-1424, ~2053-2072, ~2329-2355.
+ */
+
+const PATROL_INTERVAL = 12; // 12 * 15min = 3h
+
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm }) {
+
+  const { runAgent, agentMetrics } = agentRunner;
+  const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
+  const { runRiskCheck } = riskAgent;
+  const { executeBitgetTrade } = bitgetExec;
+  const { runStrategistCheck } = strategist;
+  const { runReview, runWeeklyReview } = reviewer;
+  const { scanMarketOpportunities } = scanner;
+  const { scoreHistoricalSignals, updateSourceScores } = signals;
+  const { fetchCrucix, fetchNews } = dataSources;
+  const { sendTelegramAlert, checkAlerts } = telegram;
+  const { persistNews, persistAnalysis, persistPatrol, insertDecision } = db;
+
+  const bus = messageBus || { postMessage: () => {} };
+
+  function buildPrompt(mode, crucixSummary, newsSummary, now) {
+    if (mode === 'stock') {
+      return `You are a senior US equity market intelligence analyst. Analyze the following real-time data and produce a structured JSON report focused on US stock market conditions.
+
+Current time: ${now}
+
+=== MACRO & MARKET DATA (Crucix 27-source intelligence) ===
+${crucixSummary}
+
+=== NEWS (AI-scored, signal: long/short/neutral) ===
+${newsSummary}
+
+Produce a JSON object with these exact fields:
+{
+  "macro_risk_score": <0-100, higher = more risk>,
+  "stock_sentiment": <0-100, higher = more bullish on US equities>,
+  "technical_bias": "long" | "short" | "neutral",
+  "recommended_action": "strong_buy" | "increase_exposure" | "hold" | "reduce_exposure" | "strong_sell",
+  "confidence": <0-100>,
+  "alerts": [
+    { "level": "FLASH|PRIORITY|ROUTINE", "signal": "<one-line Chinese description>", "source": "<data source>", "relevance": <0-100> }
+  ],
+  "briefing": "<3-4 sentence Chinese briefing for a US stock trader. Focus on S&P500, VIX, sector rotation, rate expectations, geopolitical impact on equities. Actionable, with reasoning. Include specific numbers.>",
+  "push_worthy": <true if any alert deserves immediate user notification, false otherwise>,
+  "push_reason": "<if push_worthy, one-line Chinese reason>"
+}
+
+Rules:
+- alerts: max 6, sorted by relevance desc. FLASH = market-moving. PRIORITY = notable. ROUTINE = FYI.
+- briefing: Chinese only, no English, no markdown. Include specific prices/numbers from data.
+- Focus on equity-relevant signals: VIX changes, S&P500 moves, gold as safe-haven indicator, energy prices impact on sectors, geopolitical risk to markets.
+- Filter out pure crypto news unless it has macro spillover implications (e.g. major regulatory action).
+- push_worthy: true only for FLASH-level events (VIX spike >25, S&P500 drop >2%, major Fed action, geopolitical escalation)
+- Be precise with numbers, don't round excessively
+
+Output ONLY the JSON, no other text.`;
+    }
+
+    // Default: crypto mode (original prompt)
+    return `You are a senior crypto trading intelligence analyst. Analyze the following real-time data and produce a structured JSON report.
+
+Current time: ${now}
+
+=== MACRO & MARKET DATA (Crucix 27-source intelligence) ===
+${crucixSummary}
+
+=== CRYPTO NEWS (AI-scored, signal: long/short/neutral) ===
+${newsSummary}
+
+Produce a JSON object with these exact fields:
+{
+  "macro_risk_score": <0-100, higher = more risk>,
+  "crypto_sentiment": <0-100, higher = more bullish>,
+  "technical_bias": "long" | "short" | "neutral",
+  "recommended_action": "strong_buy" | "increase_exposure" | "hold" | "reduce_exposure" | "strong_sell",
+  "confidence": <0-100>,
+  "alerts": [
+    { "level": "FLASH|PRIORITY|ROUTINE", "signal": "<one-line Chinese description>", "source": "<data source>", "relevance": <0-100> }
+  ],
+  "briefing": "<3-4 sentence Chinese briefing for a crypto trader. Actionable, with reasoning. Include specific numbers.>",
+  "push_worthy": <true if any alert deserves immediate user notification, false otherwise>,
+  "push_reason": "<if push_worthy, one-line Chinese reason>"
+}
+
+Rules:
+- alerts: max 6, sorted by relevance desc. FLASH = market-moving. PRIORITY = notable. ROUTINE = FYI.
+- briefing: Chinese only, no English, no markdown. Include specific prices/numbers from data.
+- push_worthy: true only for FLASH-level events (VIX spike, major hack, regulation news, 5%+ price move)
+- Be precise with numbers, don't round excessively
+
+Output ONLY the JSON, no other text.`;
+  }
+
+  async function runFullAnalysis(mode, crucix, news) {
+    const c = cache[mode];
+    if (c.analyzing) return;
+    c.analyzing = true;
+
+    const now = new Date().toISOString();
+    const traceId = `analysis_${mode}_${Date.now()}`;
+
+    try {
+      // --- Analyst Agent ---
+      const analystPrompt = buildAnalystSystemPrompt(mode);
+      const analystResult = await runAgent('analyst', analystPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS,
+        `Analyze current ${mode} market conditions. Time: ${now}. Fetch data using your tools, then produce the JSON report.`,
+        { trace_id: traceId, max_tokens: 1000, timeout: 90000 }
+      );
+
+      let parsed;
+      try {
+        const jsonStr = analystResult.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        parsed = JSON.parse(jsonStr);
+      } catch {
+        console.error(`[Analyst:${mode}] JSON parse failed, raw:`, analystResult.content.slice(0, 200));
+        c.analyzing = false;
+        return;
+      }
+
+      c.analysis = {
+        ...parsed,
+        mode,
+        timestamp: now,
+        trace_id: traceId,
+        raw_sources: { crucix: analystResult.toolCalls.some(t => t.name === 'get_crucix_data'), news: analystResult.toolCalls.some(t => t.name === 'get_crypto_news') },
+        agent: 'analyst',
+      };
+      c.lastUpdate = now;
+
+      const sentimentKey = mode === 'stock' ? 'stock_sentiment' : 'crypto_sentiment';
+      const sentimentVal = parsed[sentimentKey] || 0;
+      console.log(`[${now}] ${mode} analyst | Risk:${parsed.macro_risk_score} ${sentimentKey}:${sentimentVal} Bias:${parsed.technical_bias} Action:${parsed.recommended_action} Push:${parsed.push_worthy} Tools:${analystResult.toolCalls.length}`);
+
+      // Persist to SQLite
+      persistAnalysis(mode, parsed, now);
+
+      // Record analyst final decision
+      try {
+        insertDecision.run(now, 'analyst', 'analyze', '', '', JSON.stringify(parsed),
+          `${mode} market analysis`, analystResult.content.slice(0, 500), '', parsed.confidence || 0, null);
+      } catch {}
+
+      // Post analyst result to message bus
+      bus.postMessage('analyst', 'risk', 'SIGNAL_UPDATE', parsed, traceId);
+
+      // --- Risk Gate (crypto auto-trade) ---
+      // Proactive: trigger on push_worthy OR strong action with high confidence
+      const shouldTrade = parsed.push_worthy ||
+        (parsed.confidence >= 75 && ['strong_buy', 'strong_sell'].includes(parsed.recommended_action));
+      if (mode === 'crypto' && shouldTrade) {
+        const riskVerdict = await runRiskCheck(parsed, traceId);
+        if (riskVerdict.pass) {
+          // Bitget CEX (primary) -- direct execution in VPS
+          executeBitgetTrade(parsed, traceId).catch(err => console.error('[BitgetExec] Error:', err.message));
+          // On-chain (secondary) -- if AUTO_TRADE_URL configured
+          if (config.AUTO_TRADE_URL) {
+            triggerAutoTrade({ ...parsed, trace_id: traceId, risk_verdict: riskVerdict })
+              .catch(err => console.error('[AutoTrade] Trigger failed:', err.message));
+          }
+        } else {
+          console.log(`[Risk] VETO: ${riskVerdict.reason}`);
+          try {
+            insertDecision.run(now, 'risk', 'veto', '', '', JSON.stringify(riskVerdict),
+              'Auto-trade blocked by Risk agent', riskVerdict.reason, '', 0, null);
+          } catch {}
+        }
+      }
+
+      // --- Strategist Agent (crypto only, evaluate active strategies) ---
+      if (mode === 'crypto') {
+        runStrategistCheck(parsed, traceId).catch(err => console.error('[Strategist] Error:', err.message));
+      }
+
+      // Patrol report: accumulate and push every 3h (per mode)
+      c.patrolHistory.push({ ...parsed, timestamp: now });
+      c.patrolCounter++;
+      if (c.patrolCounter >= PATROL_INTERVAL) {
+        pushPatrolReport(mode, c.patrolHistory).catch(err => console.error(`[Patrol:${mode}] Error:`, err.message));
+        // Run Reviewer alongside patrol (every 3h)
+        if (mode === 'crypto') {
+          runReview(traceId).catch(err => console.error('[Reviewer] Error:', err.message));
+          // Check if weekly review is due (self-healing: checks on every patrol cycle)
+          runWeeklyReview(traceId).catch(err => console.error('[WeeklyReview] Error:', err.message));
+        }
+        c.patrolHistory = [];
+        c.patrolCounter = 0;
+      }
+    } catch (err) {
+      console.error(`[Analysis:${mode}] Error:`, err.message);
+    }
+    c.analyzing = false;
+  }
+
+  // --- Patrol Report (3h summary) ---
+
+  async function generatePatrolReport(mode, history) {
+    if (!history.length) return null;
+
+    const sentimentKey = mode === 'stock' ? 'stock_sentiment' : 'crypto_sentiment';
+    const roleLabel = mode === 'stock' ? '美股市场AI' : '加密交易AI';
+
+    const summary = history.map((h) => {
+      const t = new Date(h.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      return `${t} | Risk:${h.macro_risk_score} Sent:${h[sentimentKey] || 0} Bias:${h.technical_bias} Action:${h.recommended_action} Conf:${h.confidence}`;
+    }).join('\n');
+
+    const prompt = `你是${roleLabel}的巡逻报告员。以下是过去3小时每15分钟一次的市场分析记录（共${history.length}次）：
+
+${summary}
+
+最新一次的完整 briefing：${history[history.length - 1]?.briefing || 'N/A'}
+
+请生成一份简洁的3小时巡逻报告（中文），包含：
+1. 这3小时内市场整体走势（risk/sentiment 变化趋势）
+2. 是否有值得注意的变化或异常
+3. AI 做了什么操作（如果全是hold就说"未执行任何交易"）
+4. 下一阶段关注点
+
+要求：4-6句话，简洁直接，像给老板的快报。不要用markdown格式符号。`;
+
+    try {
+      const result = await llm([{ role: 'user', content: prompt }], { max_tokens: 400, timeout: 20000 });
+      return result.content;
+    } catch (err) {
+      console.error(`[Patrol:${mode}] Report generation failed:`, err.message);
+      const latest = history[history.length - 1];
+      return `过去3小时完成${history.length}次${mode === 'stock' ? '美股' : '加密'}市场扫描。最新状态：风险${latest.macro_risk_score}/100，情绪${latest[sentimentKey] || 0}/100，偏向${latest.technical_bias}，建议${latest.recommended_action}。未执行交易。`;
+    }
+  }
+
+  async function pushPatrolReport(mode, history) {
+    const report = await generatePatrolReport(mode, history);
+    if (!report) return;
+
+    const sentimentKey = mode === 'stock' ? 'stock_sentiment' : 'crypto_sentiment';
+    const risks = history.map(h => h.macro_risk_score);
+    const sents = history.map(h => h[sentimentKey] || 0);
+    const actions = history.map(h => h.recommended_action);
+    const trades = actions.filter(a => a === 'strong_buy' || a === 'strong_sell' || a === 'increase_exposure');
+
+    const period = `${new Date(history[0].timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} - ${new Date(history[history.length - 1].timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+    const riskRange = `${Math.min(...risks)}-${Math.max(...risks)}`;
+    const sentRange = `${Math.min(...sents)}-${Math.max(...sents)}`;
+
+    // Persist to SQLite
+    persistPatrol(mode, report, period, history.length, riskRange, sentRange, trades.length, new Date().toISOString());
+
+    // Push via frontend SSE (crypto only -- stock has no auto-trade)
+    if (config.AUTO_TRADE_URL && mode === 'crypto') {
+      const payload = {
+        type: 'PATROL_REPORT',
+        level: 'LOW',
+        data: {
+          report, mode, period,
+          scans: history.length,
+          risk_range: riskRange,
+          sentiment_range: sentRange,
+          trades_executed: trades.length,
+          dominant_action: mostCommon(actions),
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      const baseUrl = config.AUTO_TRADE_URL.replace('/api/auto-trade', '');
+      try {
+        await fetch(`${baseUrl}/api/patrol-report`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.AUTO_TRADE_SECRET}` },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(10000),
+        });
+        console.log(`[Patrol:${mode}] 3h report pushed (${history.length} scans)`);
+      } catch (err) {
+        console.error(`[Patrol:${mode}] Push failed: ${err.message}`);
+      }
+    }
+  }
+
+  function mostCommon(arr) {
+    const freq = {};
+    for (const v of arr) freq[v] = (freq[v] || 0) + 1;
+    return Object.entries(freq).sort((a, b) => b[1] - a[1])[0]?.[0] || 'hold';
+  }
+
+  async function triggerAutoTrade(signal) {
+    const traceId = signal.trace_id || `trade_${Date.now()}`;
+    const riskVerdict = signal.risk_verdict;
+    console.log(`[Executor] Push-worthy signal -> Risk: ${riskVerdict?.pass ? 'PASS' : 'N/A'} | ${signal.push_reason || 'high-value'}`);
+    try {
+      const res = await fetch(config.AUTO_TRADE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.AUTO_TRADE_SECRET}` },
+        body: JSON.stringify({ signal, trace_id: traceId }),
+        signal: AbortSignal.timeout(60000),
+      });
+      const data = await res.json();
+      console.log(`[Executor] Response: ${data.status} | Tools: ${data.tool_calls || 0}`);
+      bus.postMessage('executor', 'reviewer', 'TRADE_RESULT', data, traceId);
+    } catch (err) {
+      console.error(`[Executor] Failed: ${err.message}`);
+    }
+  }
+
+  async function collectAndAnalyze() {
+    console.log(`[${new Date().toISOString()}] Collecting data...`);
+    const [crucix, news] = await Promise.all([fetchCrucix(), fetchNews()]);
+    const newsCount = Array.isArray(news) ? news.length : 0;
+    console.log(`[${new Date().toISOString()}] Data collected. Crucix:${!!crucix} News:${newsCount}. Running dual analysis...`);
+
+    // Persist raw news
+    if (newsCount > 0) persistNews(news);
+
+    // Run crypto only (stock disabled to save ~864K tokens/day)
+    await runFullAnalysis('crypto', crucix, news);
+    // await runFullAnalysis('stock', crucix, news); // re-enable when actively trading US stocks
+
+    // Score historical signals (non-blocking)
+    try { scoreHistoricalSignals(); } catch (e) { console.error('[SignalScore] Error:', e.message); }
+
+    // Update source scores monthly
+    try { updateSourceScores(); } catch (e) { console.error('[SourceScore] Error:', e.message); }
+
+    // Check alert conditions
+    try { checkAlerts(); } catch (e) { console.error('[Alerts] Error:', e.message); }
+
+    // Technical scan + limit orders (every cycle)
+    scanMarketOpportunities().catch(e => console.error('[Scanner] Error:', e.message));
+  }
+
+  return { collectAndAnalyze, runFullAnalysis, db: db.db, signals };
+}
