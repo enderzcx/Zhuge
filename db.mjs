@@ -58,6 +58,7 @@ export function createDB() {
       exit_price REAL,
       amount REAL,
       amount_out REAL,
+      leverage INTEGER DEFAULT 1,
       pnl REAL,
       pnl_pct REAL,
       fee REAL DEFAULT 0,
@@ -68,6 +69,8 @@ export function createDB() {
       opened_at TEXT DEFAULT (datetime('now')),
       closed_at TEXT
     );
+    -- Migration: add leverage column if upgrading from older schema
+    CREATE INDEX IF NOT EXISTS idx_trades_source ON trades(source, status);
     CREATE TABLE IF NOT EXISTS decisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       timestamp TEXT DEFAULT (datetime('now')),
@@ -177,9 +180,12 @@ export function createDB() {
     INSERT INTO analysis (mode, result_json, macro_risk_score, crypto_sentiment, stock_sentiment, technical_bias, recommended_action, confidence, push_worthy, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  // Add leverage column if it doesn't exist (migration for existing DBs)
+  try { db.exec('ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1'); } catch {}
+
   const insertTrade = db.prepare(`
-    INSERT INTO trades (trade_id, source, pair, side, entry_price, amount, amount_out, status, tx_hash, signal_snapshot, decision_reasoning, opened_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO trades (trade_id, source, pair, side, entry_price, amount, amount_out, leverage, status, tx_hash, signal_snapshot, decision_reasoning, opened_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const updateTradeClose = db.prepare(`
     UPDATE trades SET exit_price = ?, pnl = ?, pnl_pct = ?, status = 'closed', closed_at = ? WHERE trade_id = ?

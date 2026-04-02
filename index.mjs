@@ -46,7 +46,6 @@ const dataSources = createDataSources(config);
 const priceStream = createPriceStream({ db, config });
 const signals = createSignalScoring({ db });
 const lifi = createLiFi(config);
-const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus });
 const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators });
 const riskAgent = createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus });
 const cache = {
@@ -56,6 +55,8 @@ const cache = {
 const strategist = createStrategist({ db, agentRunner, messageBus, cache });
 const telegram = createTelegram({ db, config, agentMetrics: agentRunner.agentMetrics, cache });
 const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram });
+// reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
+const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
 const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock });
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm });
 
@@ -80,5 +81,7 @@ app.listen(config.PORT, () => {
   console.log(`[VPS-API] Running on :${config.PORT} | LLM: ${config.LLM_MODEL} | Mode: crypto | Interval: 30min | DB: data/rifi.db`);
   pipeline.collectAndAnalyze();
   setInterval(() => pipeline.collectAndAnalyze(), 30 * 60 * 1000); // 30min (was 15min, saves ~50% tokens)
+  // Check for filled/closed positions every 5 minutes
+  setInterval(() => bitgetExec.checkAndSyncTrades().catch(e => console.error('[TradeSync] Error:', e.message)), 5 * 60 * 1000);
   priceStream.connectOKXWebSocket();
 });
