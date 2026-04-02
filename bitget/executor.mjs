@@ -27,6 +27,53 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     try { await _executeBitgetTradeInner(signal, traceId); } finally { tradingLock.release(); }
   }
 
+  function calculateKellySize(available) {
+    // Kelly Criterion: f = (p * b - q) / b
+    // p = win rate, q = 1-p, b = avg win / avg loss ratio
+    const closedTrades = db.prepare(`
+      SELECT pnl FROM trades
+      WHERE source = 'bitget' AND status = 'closed' AND entry_price > 0 AND exit_price > 0
+      ORDER BY closed_at DESC LIMIT 100
+    `).all();
+
+    const minSize = 0.01;
+
+    if (closedTrades.length < 5) return minSize; // not enough history
+
+    const wins = closedTrades.filter(t => t.pnl > 0);
+    const losses = closedTrades.filter(t => t.pnl <= 0);
+
+    if (wins.length === 0 || losses.length === 0) return minSize;
+
+    const p = wins.length / closedTrades.length;
+    const q = 1 - p;
+    const avgWin = wins.reduce((s, t) => s + t.pnl, 0) / wins.length;
+    const avgLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length);
+
+    if (avgLoss === 0) return minSize;
+
+    const b = avgWin / avgLoss;
+    const kelly = (p * b - q) / b;
+
+    if (kelly <= 0) {
+      console.log(`[Kelly] Negative Kelly (${kelly.toFixed(3)}), using min size`);
+      return minSize;
+    }
+
+    const halfKelly = kelly * 0.5; // half-Kelly for safety
+    const fraction = Math.min(halfKelly, 0.25); // cap at 25%
+
+    // Convert USDT margin → notional → ETH contract size (10x leverage)
+    const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get('ETH-USDT');
+    const ethPrice = candleRow?.close || 2000;
+    const usdtMargin = fraction * available;
+    const ethSize = (usdtMargin * 10) / ethPrice; // leverage=10
+
+    const result = Math.max(minSize, parseFloat(Math.min(ethSize, 1.0).toFixed(2)));
+    console.log(`[Kelly] p=${p.toFixed(2)} b=${b.toFixed(2)} f=${kelly.toFixed(3)} half=${fraction.toFixed(3)} → size=${result} ETH (avail=$${available.toFixed(2)})`);
+    return result;
+  }
+
   async function _executeBitgetTradeInner(signal, traceId) {
 
     const action = signal.recommended_action;
@@ -46,7 +93,6 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
     // Use ETH futures as default (affordable with small balance)
     const symbol = 'ETHUSDT';
-    const size = '0.01'; // min ETH size
     const leverage = '10';
 
     try {
@@ -72,6 +118,9 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
           JSON.stringify({ reason: 'insufficient_balance', available }), 'Bitget trade skipped', '', '', confidence, null);
         return;
       }
+
+      // Dynamic Kelly position sizing
+      const size = String(calculateKellySize(available));
 
       // Set leverage
       await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
@@ -139,6 +188,18 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
           p.symbol === trade.pair && p.holdSide === holdSide && parseFloat(p.total || '0') > 0
         );
         if (hasPos) continue;
+
+        // Position not found — check if original order is still pending (unfilled limit order)
+        if (trade.tx_hash) {
+          try {
+            const orderDetail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${trade.pair}&productType=USDT-FUTURES&orderId=${trade.tx_hash}`);
+            const orderStatus = orderDetail?.status || orderDetail?.state || '';
+            if (['live', 'initial', 'new', 'partial_fill'].includes(orderStatus)) {
+              console.log(`[TradeSync] Pending limit order ${trade.trade_id} (${orderStatus}), skip`);
+              continue;
+            }
+          } catch {}
+        }
 
         // Position no longer exists — closed (TP/SL hit or manual)
         const since = new Date(trade.opened_at).getTime();

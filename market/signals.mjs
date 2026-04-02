@@ -5,9 +5,8 @@
 export function createSignalScoring({ db }) {
   const { insertSignalScore } = db;
 
-  function findCandlePrice(pair, isoTime, getCandleBucket) {
-    const bucket = getCandleBucket(new Date(isoTime).getTime());
-    const row = db.prepare('SELECT close FROM candles WHERE pair = ? AND ts_start <= ? ORDER BY ts_start DESC LIMIT 1').get(pair, bucket);
+  function findCandlePrice(pair, isoTime) {
+    const row = db.prepare('SELECT close FROM candles WHERE pair = ? AND ts_start <= ? ORDER BY ts_start DESC LIMIT 1').get(pair, isoTime);
     return row?.close || null;
   }
 
@@ -20,7 +19,7 @@ export function createSignalScoring({ db }) {
     return null;
   }
 
-  function scoreHistoricalSignals(getCandleBucket) {
+  function scoreHistoricalSignals() {
     // Score crypto analyses older than 4h that haven't been scored yet
     const unscored = db.prepare(`
       SELECT id, recommended_action, confidence, created_at
@@ -39,10 +38,10 @@ export function createSignalScoring({ db }) {
       const ts = new Date(a.created_at).getTime();
       const pair = 'ETH-USDT'; // primary trading pair
 
-      const priceAt = findCandlePrice(pair, a.created_at, getCandleBucket);
-      const price15m = findCandlePrice(pair, new Date(ts + 15 * 60 * 1000).toISOString(), getCandleBucket);
-      const price1h = findCandlePrice(pair, new Date(ts + 60 * 60 * 1000).toISOString(), getCandleBucket);
-      const price4h = findCandlePrice(pair, new Date(ts + 4 * 60 * 60 * 1000).toISOString(), getCandleBucket);
+      const priceAt = findCandlePrice(pair, a.created_at);
+      const price15m = findCandlePrice(pair, new Date(ts + 15 * 60 * 1000).toISOString());
+      const price1h = findCandlePrice(pair, new Date(ts + 60 * 60 * 1000).toISOString());
+      const price4h = findCandlePrice(pair, new Date(ts + 4 * 60 * 60 * 1000).toISOString());
 
       if (!priceAt) continue; // No candle data for this period
 
@@ -87,7 +86,9 @@ export function createSignalScoring({ db }) {
 
     for (const s of sources) {
       const accuracy = s.total > 0 ? s.correct / s.total : 0;
-      const weight = 0.5 + accuracy; // 50% acc → 1.0x, 80% → 1.3x
+      // Auto-downgrade sources with accuracy < 40%: use raw accuracy as weight (max 0.4)
+      // Normal range: 0.5 + accuracy (50% acc → 1.0x, 80% → 1.3x)
+      const weight = accuracy < 0.40 ? accuracy : (0.5 + accuracy);
       try {
         db.prepare(`
           INSERT INTO source_scores (source_name, period, total_signals, correct_signals, accuracy, weight, updated_at)
