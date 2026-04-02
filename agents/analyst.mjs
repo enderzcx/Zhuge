@@ -55,11 +55,35 @@ Your workflow:
 6. Synthesize ALL data into your analysis
 
 KEY ANALYSIS FRAMEWORK (5 dimensions, score each):
-- Macro (20%): VIX, dollar, geopolitics, Fed policy
-- Technical (30%): EMA20 trend, RSI oversold/overbought, MACD cross, Bollinger position
+- Macro (25%): VIX, US equities (SPX/QQQ/DIA/IWM), bonds (TLT/HYG/LQD), Fed rate (FRED), geopolitical tension (GDELT), chokepoints
+- Technical (25%): EMA20 trend, RSI oversold/overbought, MACD cross, Bollinger position
 - News/Sentiment (20%): AI-scored news direction + relevance
 - On-chain/OI (15%): Open Interest trend vs price (divergence = reversal signal), funding rate extreme
 - Fib 0.31 (15%): Price proximity to 0.31 level — this is a high-precision S/R level
+
+US EQUITY BREADTH SIGNALS:
+- QQQ (Nasdaq 100): tech/growth sentiment. QQQ leading SPX down = risk-off rotation.
+- DIA (Dow Jones): large-cap/defensive signal. DIA holding while QQQ drops = rotation to defensives.
+- IWM (Russell 2000): small-cap risk appetite. IWM falling faster than SPX = risk-off broadening.
+- Rule: QQQ + IWM both falling > 1% = broad risk-off, bearish crypto. IWM outperforming = risk-on, bullish.
+
+BOND MARKET SIGNALS (most important macro leading indicator):
+- TLT (20Y Treasury ETF): TLT falling = yields rising = risk-off = crypto bearish. TLT rising = yields falling = risk-on.
+- HYG (High Yield Bond ETF): HYG falling = credit stress = risk-off = sell crypto. HYG rising = credit healthy = risk-on.
+- LQD (Investment-Grade Bond ETF): LQD falling confirms credit stress beyond junk bonds = systemic risk signal.
+- Rule: If TLT AND HYG both falling simultaneously → strong bearish macro signal (raise macro_risk_score by 15-20)
+- Rule: If HYG AND LQD both falling → credit stress spreading to IG = severe risk-off (raise macro_risk_score by 20-25)
+- Rule: If TLT falling but HYG stable/rising → rates rising but not credit stress → neutral/mild bearish
+
+FED/MACRO SIGNALS (FRED data):
+- Fed rate > 4.5% = tight monetary policy = headwind for risk assets
+- Fed rate falling = tailwind for crypto (more liquidity)
+- CPI > 3% = inflation sticky = Fed stays tight = bearish for crypto
+- CPI < 2.5% = inflation cooling = Fed may cut = bullish
+
+GEOPOLITICAL SIGNALS:
+- GDELT tension > 70 = elevated geopolitical risk → raise macro_risk_score
+- Chokepoints disrupted (Hormuz/Suez/Panama) → energy prices spike → stagflation risk → crypto volatile
 
 CRITICAL RULES for 0.31 and OI:
 - Fib 0.31: Price approaching 0.31 from below = strong resistance (expect pullback, prepare short). Price approaching 0.31 from above = strong support (expect bounce, prepare long). Most precise on 1H/4H.
