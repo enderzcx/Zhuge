@@ -53,19 +53,19 @@ Endpoint: `http://localhost:3117/api/data`
 
 | Data | Symbol | Current | History | Used by Analyst? |
 |------|--------|---------|---------|-----------------|
-| S&P 500 | SPY | $650.34 | 5-day | Partial (sp500 only) |
-| Nasdaq 100 | QQQ | $577.18 | 5-day | **NO** |
-| Dow Jones | DIA | $463.19 | 5-day | **NO** |
-| Russell 2000 | IWM | $248.00 | 5-day | **NO** |
+| S&P 500 | SPY | $650.34 | 5-day | YES |
+| Nasdaq 100 | QQQ | $577.18 | 5-day | YES |
+| Dow Jones | DIA | $463.19 | 5-day | YES |
+| Russell 2000 | IWM | $248.00 | 5-day | YES |
 | VIX | VIX | 25.25 | current | YES |
 | Gold | GC=F | $4,701.70 | 4-day | YES |
 | Silver | SI=F | $74.40 | 4-day | **NO** |
 | WTI Crude | CL=F | $102.59 | 4-day | YES |
 | Brent Crude | BZ=F | $104.81 | 4-day | **NO** |
 | Natural Gas | NG=F | $2.89 | 4-day | YES |
-| 20Y Treasury | TLT | $86.69 | current | **NO** |
-| High Yield Bond | HYG | $79.56 | current | **NO** |
-| IG Corporate | LQD | $108.99 | current | **NO** |
+| 20Y Treasury | TLT | $86.69 | current | YES |
+| High Yield Bond | HYG | $79.56 | current | YES |
+| IG Corporate | LQD | $108.99 | current | YES |
 | Bitcoin | BTC-USD | $68,114 | current | YES |
 | Ethereum | ETH-USD | $2,105 | current | YES |
 
@@ -73,7 +73,7 @@ Endpoint: `http://localhost:3117/api/data`
 
 | Key | Source | Data | Used? |
 |-----|--------|------|-------|
-| `fred` | Federal Reserve (FRED) | Interest rates, CPI, employment, GDP | **NO** |
+| `fred` | Federal Reserve (FRED) | Interest rates, CPI, employment, GDP | YES |
 | `treasury` | US Treasury | Government bond data | **NO** |
 | `bls` | Bureau of Labor Statistics | Jobs, inflation, wages | **NO** |
 | `gscpi` | NY Fed | Global Supply Chain Pressure Index | **NO** |
@@ -84,11 +84,11 @@ Endpoint: `http://localhost:3117/api/data`
 | Key | Source | Data | Used? |
 |-----|--------|------|-------|
 | `acled` | Armed Conflict Location & Event Data | Conflict events + fatalities by region | YES (count only) |
-| `gdelt` | Global Database of Events | Media-measured geopolitical tension | **NO** |
+| `gdelt` | Global Database of Events | Media-measured geopolitical tension | YES |
 | `defense` | Defense intel | Military events | **NO** |
 | `nuke` | Nuclear monitoring | Nuclear-related events | **NO** |
 | `nukeSignals` | Nuclear alerts | Threat signals | **NO** |
-| `chokepoints` | Maritime intel | Hormuz, Suez, Panama status | **NO** |
+| `chokepoints` | Maritime intel | Hormuz, Suez, Panama status | YES |
 | `tg` | Telegram channels | Urgent breaking alerts | YES (urgent only) |
 | `tSignals` | Threat aggregation | Combined threat signals | **NO** |
 
@@ -109,7 +109,7 @@ Endpoint: `http://localhost:3117/api/data`
 |-----|--------|------|-------|
 | `news` + `newsFeed` | Aggregated news | Breaking news feed | Partially (via OpenNews) |
 | `ideas` + `ideasSource` | TradingView-style | Analysis ideas | **NO** |
-| `delta` | Crucix internal | Data change velocity since last check | **NO** |
+| `delta` | Crucix internal | Data change velocity since last check | YES |
 
 ### 2. OpenNews (6551.io)
 
@@ -272,13 +272,20 @@ Base: `http://localhost:3200`
 
 ## Usage Gap Analysis
 
-**Currently used by Analyst: 7 out of 27 Crucix keys (~26%)**
 
-Immediate expansion opportunities:
-1. Add QQQ, DIA, IWM → complete US equity picture
-2. Add TLT, HYG → bond market (risk-on/risk-off signal)
-3. Add Silver, Brent → commodities breadth
-4. Add `fred` → interest rate decisions, CPI
-5. Add `gdelt` → geopolitical tension index
-6. Add `chokepoints` → energy supply disruption (like the Openclaw Hormuz example)
-7. Add `delta` → data velocity (what changed most = what matters most)
+**Currently used by Analyst: 15 out of 27 Crucix keys (~56%)**
+
+Activated in END-7:
+- QQQ, DIA, IWM → complete US equity breadth picture
+- TLT, HYG, LQD → bond market risk-on/risk-off leading indicators
+- `fred` → interest rate, CPI, unemployment (macro policy context)
+- `gdelt` → geopolitical tension index (0-100)
+- `chokepoints` → energy supply chain disruption (Hormuz, Suez, Panama)
+- `delta` → data change velocity (what matters most right now)
+
+Remaining expansion opportunities:
+1. Add Silver, Brent → commodities breadth confirmation
+2. Add `treasury` → government bond curve data
+3. Add `defense`, `nuke`, `nukeSignals` → threat escalation signals
+4. Add `space` → solar storm / comms disruption risk
+5. Add `ideas` → TradingView-style analysis signals
