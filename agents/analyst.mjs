@@ -32,13 +32,13 @@ export function createAnalyst({ db, config, bitgetClient, dataSources, priceStre
     // Performance-based mode adjustment
     let performanceBlock = '';
     try {
-      const closed = db.prepare('SELECT pnl FROM trades WHERE status = ? ORDER BY closed_at DESC LIMIT 20').all('closed');
+      const closed = db.prepare("SELECT pnl FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 20").all();
       const wins = closed.filter(t => t.pnl > 0);
       const winRate = closed.length > 0 ? (wins.length / closed.length) : 0.5;
       let consecutiveLosses = 0;
-      for (const t of closed) { if (t.pnl <= 0) consecutiveLosses++; else break; }
-      if (consecutiveLosses >= 3 || winRate < 0.35) {
-        performanceBlock = `\n\n⚠️ PERFORMANCE WARNING: Win rate ${(winRate * 100).toFixed(0)}%, ${consecutiveLosses} consecutive losses. Switch to CONSERVATIVE mode: only recommend action if confidence > 75. Prefer "hold" over marginal setups.`;
+      for (const t of closed) { if (t.pnl < 0) consecutiveLosses++; else break; }
+      if (consecutiveLosses >= 5 || winRate < 0.25) {
+        performanceBlock = `\n\n⚠️ PERFORMANCE WARNING: Win rate ${(winRate * 100).toFixed(0)}%, ${consecutiveLosses} consecutive losses. Be cautious: only recommend strong_buy/strong_sell if confidence > 70. Still allow increase_exposure/reduce_exposure at confidence > 55 for scout entries.`;
       } else if (winRate > 0.6) {
         performanceBlock = `\n\nPerformance is strong (${(winRate * 100).toFixed(0)}% win rate). Maintain current approach.`;
       }
@@ -114,7 +114,7 @@ Produce a JSON object with these exact fields:
     { "level": "FLASH|PRIORITY|ROUTINE", "signal": "<one-line Chinese description>", "source": "<data source>", "relevance": <0-100> }
   ],
   "briefing": "<3-4 sentence Chinese briefing. ${focusLabel} Include specific prices, key indicator values (RSI, EMA, OI trend), and the reasoning chain. Be actionable.>",
-  "push_worthy": <true if confidence >= 65 AND action is not hold>,
+  "push_worthy": <true if confidence >= 55 AND action is not hold>,
   "push_reason": "<if push_worthy, one-line Chinese reason>",
   "key_levels": { "support": <price>, "resistance": <price>, "fib_031": <price> }
 }
@@ -122,8 +122,8 @@ Produce a JSON object with these exact fields:
 Rules:
 - alerts: max 6, sorted by relevance desc.
 - briefing: Chinese only, no markdown. Include specific prices/indicator values.
-- push_worthy: true when confidence >= 65 AND recommended_action is NOT hold (be more proactive!)
-- IMPORTANT: push_worthy was previously too conservative. If technical + macro align with confidence > 65, push it.
+- push_worthy: true when confidence >= 55 AND recommended_action is NOT hold (be proactive! We use graduated position sizing now — small scout positions at lower confidence, scaling up as confidence grows)
+- The system now uses 4-level position scaling (1:1:2:4). Lower confidence = smaller position. Don't hold back on directional signals just because confidence isn't extremely high.
 - Be precise with numbers
 - Output ONLY the JSON after gathering data, no other text.${lessonsBlock}${performanceBlock}`;
   }

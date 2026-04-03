@@ -170,6 +170,40 @@ export function createDB() {
       updated_at TEXT DEFAULT (datetime('now')),
       UNIQUE(source_name, period)
     );
+
+    -- Graduated position scaling: group of up to 4 levels
+    CREATE TABLE IF NOT EXISTS position_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      symbol TEXT NOT NULL,
+      side TEXT NOT NULL,
+      current_level INTEGER DEFAULT 0,
+      avg_entry_price REAL DEFAULT 0,
+      total_size REAL DEFAULT 0,
+      max_kelly_size REAL DEFAULT 0,
+      stop_loss REAL,
+      take_profit REAL,
+      status TEXT DEFAULT 'active',
+      opened_at TEXT DEFAULT (datetime('now')),
+      closed_at TEXT,
+      pnl REAL,
+      pnl_pct REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pg_status ON position_groups(status, symbol);
+
+    -- Individual level entries within a position group
+    CREATE TABLE IF NOT EXISTS position_levels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL REFERENCES position_groups(id),
+      level INTEGER NOT NULL,
+      trade_id TEXT,
+      order_id TEXT,
+      size REAL NOT NULL,
+      entry_price REAL,
+      confidence INTEGER,
+      signal_action TEXT,
+      opened_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_pl_group ON position_levels(group_id);
   `);
 
   const insertNews = db.prepare(`
@@ -206,6 +240,36 @@ export function createDB() {
     INSERT OR IGNORE INTO signal_scores (analysis_id, recommended_action, confidence, price_at_signal, price_15m, price_1h, price_4h, correct_15m, correct_1h, correct_4h)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+
+  // --- Position group helpers ---
+  const insertPositionGroup = db.prepare(`
+    INSERT INTO position_groups (symbol, side, current_level, avg_entry_price, total_size, max_kelly_size, stop_loss, take_profit)
+    VALUES (?, ?, 0, ?, ?, ?, ?, ?)
+  `);
+  const insertPositionLevel = db.prepare(`
+    INSERT INTO position_levels (group_id, level, trade_id, order_id, size, entry_price, confidence, signal_action)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const updatePositionGroup = db.prepare(`
+    UPDATE position_groups SET current_level = ?, avg_entry_price = ?, total_size = ?, stop_loss = ?, take_profit = ? WHERE id = ?
+  `);
+  const closePositionGroup = db.prepare(`
+    UPDATE position_groups SET status = ?, closed_at = datetime('now'), pnl = ?, pnl_pct = ? WHERE id = ?
+  `);
+
+  function getActiveGroup(symbol) {
+    return db.prepare(`SELECT * FROM position_groups WHERE symbol = ? AND status = 'active' LIMIT 1`).get(symbol) || null;
+  }
+  function getGroupLevels(groupId) {
+    return db.prepare(`SELECT * FROM position_levels WHERE group_id = ? ORDER BY level`).all(groupId);
+  }
+  function getLastAbandonedTime(symbol) {
+    const row = db.prepare(`SELECT closed_at FROM position_groups WHERE symbol = ? AND status = 'abandoned' ORDER BY closed_at DESC LIMIT 1`).get(symbol);
+    return row ? new Date(row.closed_at + 'Z').getTime() : 0;
+  }
+  function getAllActiveGroups() {
+    return db.prepare(`SELECT * FROM position_groups WHERE status = 'active'`).all();
+  }
 
   function persistNews(newsArr) {
     const now = new Date().toISOString();
@@ -258,6 +322,8 @@ export function createDB() {
     exec: (...args) => db.exec(...args),
     insertNews, insertAnalysis, insertTrade, updateTradeClose,
     insertDecision, insertPatrol, insertCandle, insertSignalScore,
+    insertPositionGroup, insertPositionLevel, updatePositionGroup, closePositionGroup,
+    getActiveGroup, getGroupLevels, getLastAbandonedTime, getAllActiveGroups,
     persistNews, persistAnalysis, persistPatrol,
   };
 }

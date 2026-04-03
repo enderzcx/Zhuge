@@ -54,18 +54,19 @@ Your workflow:
 
   const RISK_EXECUTORS = {
     get_trade_stats: async () => {
-      const closed = db.prepare('SELECT * FROM trades WHERE status = ? ORDER BY closed_at DESC LIMIT 20').all('closed');
-      const open = db.prepare('SELECT * FROM trades WHERE status = ? ORDER BY opened_at DESC').all('open');
+      // Filter out pnl=0 trades (unfilled limit orders) for accurate stats
+      const closed = db.prepare("SELECT * FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 20").all();
+      const open = db.prepare("SELECT * FROM trades WHERE status = 'open' ORDER BY opened_at DESC").all();
       const wins = closed.filter(t => t.pnl > 0);
       const totalPnl = closed.reduce((s, t) => s + (t.pnl || 0), 0);
       // 24h loss check
       const h24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const recent24h = closed.filter(t => t.closed_at && t.closed_at > h24);
       const loss24h = recent24h.reduce((s, t) => s + Math.min(0, t.pnl || 0), 0);
-      // Consecutive losses
+      // Consecutive losses (only count actual losses, not unfilled orders)
       let consecutiveLosses = 0;
       for (const t of closed) {
-        if (t.pnl <= 0) consecutiveLosses++;
+        if (t.pnl < 0) consecutiveLosses++;
         else break;
       }
       return JSON.stringify({
@@ -92,22 +93,44 @@ Your workflow:
 
     // --- Hard rules (code-level, cannot be bypassed by LLM) ---
 
-    // Check consecutive losses (count from most recent, any length)
-    const recentTrades = db.prepare('SELECT pnl FROM trades WHERE status = ? ORDER BY closed_at DESC LIMIT 10').all('closed');
+    // Check consecutive losses — count by position_groups if scaling enabled, else by trades
     let consecutiveLossCount = 0;
-    for (const t of recentTrades) { if (t.pnl <= 0) consecutiveLossCount++; else break; }
-    const consecutiveLosses = consecutiveLossCount >= 3;
+    const SCALING = config.SCALING;
+    if (SCALING?.enabled) {
+      // Count at group level: one abandoned group = one loss
+      const recentGroups = db.prepare("SELECT pnl, closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') ORDER BY closed_at DESC LIMIT 10").all();
+      for (const g of recentGroups) { if ((g.pnl || 0) < 0) consecutiveLossCount++; else break; }
+    } else {
+      // Only count actual losses (pnl < 0), skip pnl=0 (unfilled orders marked closed)
+      const recentTrades = db.prepare("SELECT pnl FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 10").all();
+      for (const t of recentTrades) { if (t.pnl < 0) consecutiveLossCount++; else break; }
+    }
+    const lossThresholdCount = SCALING?.enabled ? 5 : 3; // more lenient with scaling
+    const consecutiveLosses = consecutiveLossCount >= lossThresholdCount;
 
     // Check last loss time for cooldown
     if (consecutiveLosses) {
-      const lastLoss = db.prepare('SELECT closed_at FROM trades WHERE status = ? AND pnl <= 0 ORDER BY closed_at DESC LIMIT 1').get('closed');
+      const lastLossQuery = SCALING?.enabled
+        ? "SELECT closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') AND pnl < 0 ORDER BY closed_at DESC LIMIT 1"
+        : "SELECT closed_at FROM trades WHERE status = 'closed' AND pnl < 0 ORDER BY closed_at DESC LIMIT 1";
+      const lastLoss = db.prepare(lastLossQuery).get();
       if (lastLoss?.closed_at) {
-        const cooldownEnd = new Date(lastLoss.closed_at).getTime() + 60 * 60 * 1000; // 1h
+        const cooldownEnd = new Date(lastLoss.closed_at + 'Z').getTime() + 60 * 60 * 1000; // 1h
         if (Date.now() < cooldownEnd) {
-          const reason = `连续3笔亏损，冷却期至 ${new Date(cooldownEnd).toISOString().slice(11, 16)}`;
+          const reason = `连续${lossThresholdCount}笔亏损，冷却期至 ${new Date(cooldownEnd).toISOString().slice(11, 16)}`;
           postMessage('risk', 'executor', 'VETO', { reason }, traceId);
           return { pass: false, reason, risk_flags: ['consecutive_losses', 'cooldown_active'] };
         }
+      }
+    }
+
+    // Check total active exposure across all symbols (scaling mode)
+    if (SCALING?.enabled) {
+      const activeGroups = db.prepare("SELECT total_size, symbol FROM position_groups WHERE status = 'active'").all();
+      const totalExposure = activeGroups.reduce((s, g) => s + (g.total_size || 0), 0);
+      if (totalExposure >= SCALING.max_exposure_eth) {
+        const reason = `总敞口 ${totalExposure.toFixed(4)} 已达上限 ${SCALING.max_exposure_eth}`;
+        return { pass: false, reason, risk_flags: ['max_exposure'] };
       }
     }
 

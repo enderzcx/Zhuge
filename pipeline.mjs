@@ -10,8 +10,10 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, bi
   const { runAgent, agentMetrics } = agentRunner;
   const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
   const { runRiskCheck } = riskAgent;
-  const { executeBitgetTrade } = bitgetExec;
+  const { executeBitgetTrade, openScoutPosition, scaleUpPosition, abandonPosition,
+          checkScaleUpConditions, checkAbandonConditions } = bitgetExec;
   const { runStrategistCheck } = strategist;
+  const SCALING = config.SCALING;
   const { runReview, runWeeklyReview } = reviewer;
   const { scanMarketOpportunities } = scanner;
   const { scoreHistoricalSignals, updateSourceScores } = signals;
@@ -146,26 +148,37 @@ Output ONLY the JSON, no other text.`;
       // Post analyst result to message bus
       bus.postMessage('analyst', 'risk', 'SIGNAL_UPDATE', parsed, traceId);
 
-      // --- Risk Gate (crypto auto-trade) ---
-      // Proactive: trigger on push_worthy OR strong action with high confidence
-      const shouldTrade = parsed.push_worthy ||
-        (parsed.confidence >= 75 && ['strong_buy', 'strong_sell'].includes(parsed.recommended_action));
-      if (mode === 'crypto' && shouldTrade) {
-        const riskVerdict = await runRiskCheck(parsed, traceId);
-        if (riskVerdict.pass) {
-          // Bitget CEX (primary) -- direct execution in VPS
-          executeBitgetTrade(parsed, traceId).catch(err => console.error('[BitgetExec] Error:', err.message));
-          // On-chain (secondary) -- if AUTO_TRADE_URL configured
-          if (config.AUTO_TRADE_URL) {
-            triggerAutoTrade({ ...parsed, trace_id: traceId, risk_verdict: riskVerdict })
-              .catch(err => console.error('[AutoTrade] Trigger failed:', err.message));
+      // --- Risk Gate & Graduated Position Scaling ---
+      if (mode === 'crypto') {
+        if (SCALING?.enabled) {
+          // Run scaling logic for each symbol
+          for (const symbol of SCALING.symbols) {
+            try {
+              await _handleScalingForSymbol(symbol, parsed, traceId, now);
+            } catch (err) {
+              console.error(`[Scaling:${symbol}] Error:`, err.message);
+            }
           }
         } else {
-          console.log(`[Risk] VETO: ${riskVerdict.reason}`);
-          try {
-            insertDecision.run(now, 'risk', 'veto', '', '', JSON.stringify(riskVerdict),
-              'Auto-trade blocked by Risk agent', riskVerdict.reason, '', 0, null);
-          } catch {}
+          // Fallback: original all-or-nothing logic
+          const shouldTrade = parsed.push_worthy ||
+            (parsed.confidence >= 75 && ['strong_buy', 'strong_sell'].includes(parsed.recommended_action));
+          if (shouldTrade) {
+            const riskVerdict = await runRiskCheck(parsed, traceId);
+            if (riskVerdict.pass) {
+              executeBitgetTrade(parsed, traceId).catch(err => console.error('[BitgetExec] Error:', err.message));
+              if (config.AUTO_TRADE_URL) {
+                triggerAutoTrade({ ...parsed, trace_id: traceId, risk_verdict: riskVerdict })
+                  .catch(err => console.error('[AutoTrade] Trigger failed:', err.message));
+              }
+            } else {
+              console.log(`[Risk] VETO: ${riskVerdict.reason}`);
+              try {
+                insertDecision.run(now, 'risk', 'veto', '', '', JSON.stringify(riskVerdict),
+                  'Auto-trade blocked by Risk agent', riskVerdict.reason, '', 0, null);
+              } catch {}
+            }
+          }
         }
       }
 
@@ -328,6 +341,71 @@ ${summary}
 
     // Technical scan + limit orders (every cycle)
     scanMarketOpportunities().catch(e => console.error('[Scanner] Error:', e.message));
+  }
+
+  // --- Graduated Scaling: per-symbol decision logic ---
+  async function _handleScalingForSymbol(symbol, signal, traceId, now) {
+    const action = signal.recommended_action;
+    const confidence = signal.confidence || 0;
+
+    // Get current price for this symbol
+    const pair = symbol.replace('USDT', '-USDT');
+    const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get(pair);
+    const currentPrice = candleRow?.close || 0;
+
+    if (!currentPrice) {
+      console.log(`[Scaling:${symbol}] No price data, skip`);
+      return;
+    }
+
+    const activeGroup = db.getActiveGroup(symbol);
+
+    if (activeGroup) {
+      // --- Has active position group: check scale-up or abandon ---
+
+      // Check abandon first (stop-loss or strong reversal)
+      if (checkAbandonConditions(activeGroup, signal, currentPrice)) {
+        console.log(`[Scaling:${symbol}] Abandon triggered (L${activeGroup.current_level})`);
+        await abandonPosition(activeGroup, traceId);
+        return;
+      }
+
+      // Check scale-up
+      if (checkScaleUpConditions(activeGroup, signal, currentPrice)) {
+        const nextLevel = activeGroup.current_level + 1;
+        // Risk check before scaling up
+        const riskVerdict = await runRiskCheck(signal, traceId);
+        if (riskVerdict.pass) {
+          const result = await scaleUpPosition(activeGroup, signal, traceId);
+          if (result) {
+            console.log(`[Scaling:${symbol}] Scaled to L${result.level} | +${result.size} | avgEntry=$${result.avgEntry?.toFixed(2)}`);
+          }
+        } else {
+          console.log(`[Scaling:${symbol}] ScaleUp VETO (L${nextLevel}): ${riskVerdict.reason}`);
+        }
+      }
+    } else {
+      // --- No active position: check if we should open a scout ---
+      const isDirectional = SCALING.action_requirements[0].includes(action);
+      const meetsConfidence = confidence >= SCALING.confidence_thresholds[0];
+
+      if (isDirectional && meetsConfidence) {
+        // Risk check before opening scout
+        const riskVerdict = await runRiskCheck(signal, traceId);
+        if (riskVerdict.pass) {
+          const result = await openScoutPosition(symbol, signal, traceId);
+          if (result) {
+            console.log(`[Scaling:${symbol}] Scout opened: L0 ${result.holdSide} ${result.size}`);
+          }
+        } else {
+          console.log(`[Scaling:${symbol}] Scout VETO: ${riskVerdict.reason}`);
+          try {
+            insertDecision.run(now, 'risk', 'scout_veto', '', '', JSON.stringify(riskVerdict),
+              `Scout blocked for ${symbol}`, riskVerdict.reason, '', confidence, null);
+          } catch {}
+        }
+      }
+    }
   }
 
   return { collectAndAnalyze, runFullAnalysis, db: db.db, signals };

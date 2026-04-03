@@ -73,11 +73,30 @@ export function createConfig() {
   const PATROL_INTERVAL = 12; // 12 * 15min = 3h
   const WEEKLY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
+  // --- Graduated Position Scaling ---
+  const SCALING = {
+    enabled: true,
+    ratios: [1, 1, 2, 4],                          // L0:L1:L2:L3 = 1:1:2:4 (total 8 parts)
+    confidence_thresholds: [55, 60, 70, 80],        // min confidence per level
+    price_confirm_pcts: [0, 0.003, 0.006, 0.01],     // cumulative price move as fraction (0.3%, 0.6%, 1.0%)
+    action_requirements: [
+      ['increase_exposure', 'strong_buy', 'strong_sell'],                     // L0: directional (no reduce_exposure — contradicts opening new position)
+      ['increase_exposure', 'strong_buy', 'strong_sell'],                     // L1: directional
+      ['strong_buy', 'strong_sell'],                                          // L2: strong only
+      ['strong_buy', 'strong_sell'],                                          // L3: strong only
+    ],
+    stop_loss_pcts: [3.0, 2.5, 2.0, 1.5],           // SL % from avg entry per level (tightens)
+    max_exposure_eth: 1.0,                           // hard cap total position
+    max_exposure_pct: 0.30,                          // max % of account equity
+    abandon_cooldown_ms: 30 * 60 * 1000,             // 30 min cooldown after abandon
+    symbols: ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],     // tradable symbols
+  };
+
   return {
     PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API,
     AUTO_TRADE_URL, AUTO_TRADE_SECRET,
     BITGET_API_KEY, BITGET_SECRET, BITGET_PASS, BITGET_BASE,
-    AGENT_MODELS,
+    AGENT_MODELS, SCALING,
     LIFI_DIAMOND, SESSION_MANAGER_V2, CHAIN_MAP, CHAIN_OBJECTS, TOKEN_REGISTRY, SM_V2_ABI,
     PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
