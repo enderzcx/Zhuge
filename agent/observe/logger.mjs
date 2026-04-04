@@ -3,7 +3,7 @@
  * Drop-in replacement for console.log in pipeline modules.
  */
 
-import { appendFileSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 const LOG_DIR = 'data/logs';
@@ -66,8 +66,7 @@ export function createLogger(opts = {}) {
     const results = [];
     for (const file of files) {
       try {
-        const lines = require('fs')
-          .readFileSync(join(LOG_DIR, file), 'utf-8')
+        const lines = readFileSync(join(LOG_DIR, file), 'utf-8')
           .split('\n')
           .filter(Boolean)
           .reverse();
