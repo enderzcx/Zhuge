@@ -5,9 +5,10 @@
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
-export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm }) {
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics }) {
 
   const { runAgent, agentMetrics } = agentRunner;
+  const _metrics = metrics || { record() {} }; // fallback if not provided
   const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
   const { runRiskCheck } = riskAgent;
   const { executeBitgetTrade, openScoutPosition, scaleUpPosition, abandonPosition,
@@ -107,10 +108,16 @@ Output ONLY the JSON, no other text.`;
     try {
       // --- Analyst Agent ---
       const analystPrompt = buildAnalystSystemPrompt(mode);
+      const _analystStart = Date.now();
       const analystResult = await runAgent('analyst', analystPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS,
         `Analyze current ${mode} market conditions. Time: ${now}. Fetch data using your tools, then produce the JSON report.`,
         { trace_id: traceId, max_tokens: 1000, timeout: 90000 }
       );
+      _metrics.record('llm_latency_ms', Date.now() - _analystStart, { agent: 'analyst', mode });
+      if (analystResult.tokensUsed) {
+        _metrics.record('llm_tokens_in', analystResult.tokensUsed.input || 0, { agent: 'analyst' });
+        _metrics.record('llm_tokens_out', analystResult.tokensUsed.output || 0, { agent: 'analyst' });
+      }
 
       let parsed;
       try {

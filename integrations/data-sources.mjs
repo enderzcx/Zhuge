@@ -114,7 +114,8 @@ export function createDataSources(config) {
       const signal = n.signal || n.aiRating?.signal || '?';
       const title = (n.title || n.headline || '').slice(0, 120);
       const src = n.source || '?';
-      return `${i + 1}. [${signal}|${score}] ${title} (${src})`;
+      const url = n.url || n.link || '';
+      return `${i + 1}. [${signal}|${score}] ${title} (${src})${url ? '\n   ' + url : ''}`;
     }).join('\n');
   }
 

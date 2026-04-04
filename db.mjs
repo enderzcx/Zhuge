@@ -223,6 +223,21 @@ export function createDB() {
       UNIQUE(symbol, discovered_at)
     );
     CREATE INDEX IF NOT EXISTS idx_cc_symbol ON coin_candidates(symbol, discovered_at);
+
+    -- Push history: AI-analyzed push events with full context
+    CREATE TABLE IF NOT EXISTS push_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      push_id TEXT UNIQUE,
+      level TEXT NOT NULL,
+      text TEXT NOT NULL,
+      url TEXT,
+      analysis_json TEXT,
+      raw_news_json TEXT,
+      reasoning TEXT,
+      trace_id TEXT,
+      pushed_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_ts ON push_history(pushed_at);
   `);
 
   const insertNews = db.prepare(`
@@ -343,6 +358,11 @@ export function createDB() {
   `);
   const markCandidateTraded = db.prepare(`UPDATE coin_candidates SET traded = 1 WHERE id = ?`);
 
+  const insertPush = db.prepare(`
+    INSERT INTO push_history (push_id, level, text, url, analysis_json, raw_news_json, reasoning, trace_id, pushed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
   // Proxy prepare/exec so modules can call db.prepare() directly
   return {
     db,
@@ -354,5 +374,6 @@ export function createDB() {
     getActiveGroup, getGroupLevels, getLastAbandonedTime, getAllActiveGroups,
     persistNews, persistAnalysis, persistPatrol,
     insertCandidate, updateCandidateResearch, markCandidateTraded,
+    insertPush,
   };
 }

@@ -24,6 +24,10 @@ import { createDataSources } from './integrations/data-sources.mjs';
 import { createLiFi, registerLiFiRoutes } from './integrations/lifi.mjs';
 import { createTelegram } from './integrations/telegram.mjs';
 import { createPipeline } from './pipeline.mjs';
+// Observability
+import { createMetrics } from './agent/observe/metrics.mjs';
+import { createLogger } from './agent/observe/logger.mjs';
+import { createHealthMonitor } from './agent/observe/health.mjs';
 // StockPulse Telegram Bot
 import { createLLMQueue } from './stockpulse/llm-queue.mjs';
 import { createPushEngine } from './stockpulse/push-engine.mjs';
@@ -44,6 +48,10 @@ app.use(express.json());
 
 // --- Create modules ---
 const db = createDB();
+const metrics = createMetrics(db.db);
+const { log } = createLogger();
+const health = createHealthMonitor(metrics);
+health.start();
 const llm = createLLM(config);
 const bitgetClient = createBitgetClient(config);
 const messageBus = createMessageBus({ db });
@@ -65,7 +73,7 @@ const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram 
 const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources });
 const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher });
-const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm });
+const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics });
 
 // --- StockPulse Telegram Bot ---
 const eventBus = { emit() {} }; // lightweight stub, full eventBus not needed for bot
