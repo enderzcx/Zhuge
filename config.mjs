@@ -103,7 +103,7 @@ export function createConfig() {
     max_open: 2,                             // max simultaneous momentum trades
     margin_per_trade: 2.5,                   // USDT margin per trade
     leverage: 10,
-    min_score: 65,                           // minimum research score to trade
+    min_score: 60,                           // minimum research score to trade (lowered for momentum strategy)
     volume_threshold: 1_000_000,             // $1M min 24h volume
     change_threshold: 0.05,                  // 5% min 24h change for "trending"
     max_daily_loss: 5,                       // USDT, pause if exceeded
