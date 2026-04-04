@@ -319,16 +319,24 @@ ${summary}
 
   async function collectAndAnalyze() {
     console.log(`[${new Date().toISOString()}] Collecting data...`);
+
+    // Scanner: broad market scan for logging/monitoring (analyst uses its own tools for BTC/ETH/SOL)
+    let marketScanCount = 0;
+    try {
+      const opps = await scanMarketOpportunities();
+      marketScanCount = opps.length;
+    } catch (e) { console.error('[Scanner] Error:', e.message); }
+
     const [crucix, news] = await Promise.all([fetchCrucix(), fetchNews()]);
     const newsCount = Array.isArray(news) ? news.length : 0;
-    console.log(`[${new Date().toISOString()}] Data collected. Crucix:${!!crucix} News:${newsCount}. Running dual analysis...`);
+    console.log(`[${new Date().toISOString()}] Data collected. Crucix:${!!crucix} News:${newsCount} MarketScan:${marketScanCount}. Running analysis...`);
 
     // Persist raw news
     if (newsCount > 0) persistNews(news);
 
-    // Run crypto only (stock disabled to save ~864K tokens/day)
+    // Run crypto analysis (stock disabled to save tokens)
     await runFullAnalysis('crypto', crucix, news);
-    // await runFullAnalysis('stock', crucix, news); // re-enable when actively trading US stocks
+    // await runFullAnalysis('stock', crucix, news);
 
     // Score historical signals (non-blocking)
     try { scoreHistoricalSignals(); } catch (e) { console.error('[SignalScore] Error:', e.message); }
@@ -339,8 +347,8 @@ ${summary}
     // Check alert conditions
     try { checkAlerts(); } catch (e) { console.error('[Alerts] Error:', e.message); }
 
-    // Technical scan + limit orders (every cycle)
-    scanMarketOpportunities().catch(e => console.error('[Scanner] Error:', e.message));
+    // Momentum: discover + research + trade new/trending coins
+    try { await scanner.runMomentumPipeline(); } catch (e) { console.error('[Momentum] Error:', e.message); }
   }
 
   // --- Graduated Scaling: per-symbol decision logic ---

@@ -204,6 +204,25 @@ export function createDB() {
       opened_at TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_pl_group ON position_levels(group_id);
+
+    -- Momentum: coin discovery and research tracking
+    CREATE TABLE IF NOT EXISTS coin_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      symbol TEXT NOT NULL,
+      discovery_type TEXT DEFAULT 'new_listing',
+      volume_24h REAL,
+      change_24h REAL,
+      price REAL,
+      funding_rate REAL,
+      research_score INTEGER,
+      research_verdict TEXT,
+      research_json TEXT,
+      discovered_at TEXT DEFAULT (datetime('now')),
+      researched_at TEXT,
+      traded INTEGER DEFAULT 0,
+      UNIQUE(symbol, discovered_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cc_symbol ON coin_candidates(symbol, discovered_at);
   `);
 
   const insertNews = db.prepare(`
@@ -315,6 +334,15 @@ export function createDB() {
     } catch (e) { console.error('[DB] Patrol insert error:', e.message); }
   }
 
+  const insertCandidate = db.prepare(`
+    INSERT OR IGNORE INTO coin_candidates (symbol, discovery_type, volume_24h, change_24h, price, funding_rate, discovered_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const updateCandidateResearch = db.prepare(`
+    UPDATE coin_candidates SET research_score = ?, research_verdict = ?, research_json = ?, researched_at = ? WHERE id = ?
+  `);
+  const markCandidateTraded = db.prepare(`UPDATE coin_candidates SET traded = 1 WHERE id = ?`);
+
   // Proxy prepare/exec so modules can call db.prepare() directly
   return {
     db,
@@ -325,5 +353,6 @@ export function createDB() {
     insertPositionGroup, insertPositionLevel, updatePositionGroup, closePositionGroup,
     getActiveGroup, getGroupLevels, getLastAbandonedTime, getAllActiveGroups,
     persistNews, persistAnalysis, persistPatrol,
+    insertCandidate, updateCandidateResearch, markCandidateTraded,
   };
 }

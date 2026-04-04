@@ -1,24 +1,30 @@
 /**
- * Market scanner: opportunity detection + technical trading via LLM.
+ * Market scanner: opportunity detection + pending order review + momentum coin discovery & trading.
  */
 
 import { calcRSI, calcBollinger } from './indicators.mjs';
 
-export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock }) {
+export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher }) {
   const { bitgetPublic, bitgetRequest } = bitgetClient;
   const { runAgent } = agentRunner;
-  const { insertTrade, insertDecision } = db;
+  const { insertDecision, insertTrade, insertCandidate, updateCandidateResearch, markCandidateTraded } = db;
+  const MOMENTUM = config.MOMENTUM;
 
+  // Cache known symbols to detect new listings
+  let _knownSymbols = new Set();
+  let _bootCycles = 0;
+
+  /**
+   * Scan market for opportunities — returns data for analyst, does NOT place trades.
+   */
   async function scanMarketOpportunities() {
-    if (!config.BITGET_API_KEY) return;
+    if (!config.BITGET_API_KEY) return [];
     console.log('[Scanner] Scanning futures market...');
 
     try {
-      // 1. Get all futures tickers
       const tickers = await bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
-      if (!tickers?.length) return;
+      if (!tickers?.length) return [];
 
-      // 2. Filter: volume > $5M, meaningful move
       const candidates = tickers.filter(t => {
         const vol = parseFloat(t.usdtVolume || 0);
         const chg = Math.abs(parseFloat(t.change24h || 0));
@@ -33,219 +39,431 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
         low24h: parseFloat(t.low24h),
       })).sort((a, b) => Math.abs(b.change24h) - Math.abs(a.change24h));
 
-      // 3. For top 10 candidates, fetch 1h candles and compute indicators
       const opportunities = [];
       for (const c of candidates.slice(0, 10)) {
         try {
           const candles = await bitgetPublic(`/api/v2/mix/market/candles?symbol=${c.symbol}&productType=USDT-FUTURES&granularity=1H&limit=50`);
           if (!candles?.length) continue;
 
-          // Parse candles: [ts, open, high, low, close, vol, quoteVol]
-          const closes = candles.map(k => parseFloat(k[4])).reverse(); // oldest first
+          const closes = candles.map(k => parseFloat(k[4])).reverse();
           const highs = candles.map(k => parseFloat(k[2])).reverse();
           const lows = candles.map(k => parseFloat(k[3])).reverse();
 
-          // RSI (14)
           const rsi = calcRSI(closes, 14);
-          // MA20, MA50
           const ma20 = closes.length >= 20 ? closes.slice(-20).reduce((s, v) => s + v, 0) / 20 : null;
           const ma50 = closes.length >= 50 ? closes.slice(-50).reduce((s, v) => s + v, 0) / 50 : null;
-          // Bollinger Bands (20, 2)
           const bb = calcBollinger(closes, 20);
-          // Support & Resistance (recent swing lows/highs)
           const support = Math.min(...lows.slice(-20));
           const resistance = Math.max(...highs.slice(-20));
 
           opportunities.push({
             ...c,
-            rsi,
-            ma20,
-            ma50,
-            bb,
-            support,
-            resistance,
+            rsi, ma20, ma50, bb, support, resistance,
             signal: rsi < 30 ? 'oversold' : rsi > 70 ? 'overbought' : 'neutral',
             trend: ma20 && ma50 ? (ma20 > ma50 ? 'bullish' : 'bearish') : 'unknown',
           });
         } catch {}
       }
 
-      // 4. Check margin + pending orders before trading
-      let availableMargin = 0;
-      let totalEquity = 0;
-      try {
-        const accts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
-        const usdt = (accts || []).find(a => a.marginCoin === 'USDT');
-        availableMargin = parseFloat(usdt?.crossedMaxAvailable || usdt?.available || '0');
-        totalEquity = parseFloat(usdt?.accountEquity || '0');
-      } catch {}
-
-      // If margin locked by pending orders, cancel them to free up for potentially better trades
-      if (availableMargin < 2.0 && totalEquity >= 2.0) {
-        console.log(`[Scanner] Margin locked ($${availableMargin.toFixed(2)} avail / $${totalEquity.toFixed(2)} equity). Checking pending orders...`);
-        try {
-          const pendingData = await bitgetRequest('GET', '/api/v2/mix/order/orders-pending?productType=USDT-FUTURES');
-          const pendingOrders = pendingData?.entrustedList || (Array.isArray(pendingData) ? pendingData : []);
-          if (pendingOrders.length > 0) {
-            // Only cancel limit/market orders, not TP/SL plan orders
-            const cancellable = pendingOrders.filter(o => o.orderType === 'limit' || o.orderType === 'market');
-            console.log(`[Scanner] Found ${pendingOrders.length} pending order(s), ${cancellable.length} cancellable (excluding TP/SL).`);
-            for (const order of cancellable) {
-              try {
-                await bitgetRequest('POST', '/api/v2/mix/order/cancel-order', {
-                  symbol: order.symbol, productType: 'USDT-FUTURES', orderId: order.orderId,
-                });
-                console.log(`[Scanner] Cancelled ${order.symbol} ${order.side} @ ${order.price} (orderId: ${order.orderId})`);
-              } catch (e) { console.error(`[Scanner] Cancel failed:`, e.message); }
-            }
-            // Re-check available margin after cancellation
-            await new Promise(r => setTimeout(r, 1000));
-            const accts2 = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
-            const usdt2 = (accts2 || []).find(a => a.marginCoin === 'USDT');
-            availableMargin = parseFloat(usdt2?.crossedMaxAvailable || usdt2?.available || '0');
-            console.log(`[Scanner] After cancel: available margin $${availableMargin.toFixed(2)}`);
-          }
-        } catch (e) { console.error('[Scanner] Pending order check failed:', e.message); }
-      }
-
-      // Only call LLM if at least one opportunity has extreme RSI (saves ~300K tokens/day)
-      const extremeSetups = opportunities.filter(o => o.rsi < 25 || o.rsi > 75);
-
-      if (availableMargin < 2.0) {
-        console.log(`[Scanner] Skip trading: available margin $${availableMargin.toFixed(2)} < $2.00`);
-      } else if (extremeSetups.length > 0) {
-        console.log(`[Scanner] ${extremeSetups.length} extreme RSI setups found, calling LLM...`);
-        await runTechnicalTrading(opportunities); // pass all for context, but LLM knows to focus on extremes
-      } else {
-        console.log(`[Scanner] No extreme RSI setups (range: ${Math.min(...opportunities.map(o => o.rsi)).toFixed(0)}-${Math.max(...opportunities.map(o => o.rsi)).toFixed(0)}), skip LLM`);
-      }
-
       console.log(`[Scanner] Found ${opportunities.length} opportunities from ${candidates.length} candidates`);
+      return opportunities;
     } catch (err) {
       console.error('[Scanner] Error:', err.message);
+      return [];
     }
   }
 
-  async function runTechnicalTrading(opportunities) {
-    if (!tradingLock.acquire()) { console.log('[TechTrading] Trading lock active, skip'); return; }
-    try { await _runTechnicalTradingInner(opportunities); } finally { tradingLock.release(); }
-  }
-
-  async function _runTechnicalTradingInner(opportunities) {
-    const traceId = `tech_${Date.now()}`;
-    const prompt = `You are RIFI's Technical Trading Agent. Analyze these opportunities and decide which ones to trade.
-
-Available balance: ~$2.7 USDT in Bitget futures. Use 10x leverage. Pick only 1 best setup and go all-in with full balance.
-
-Opportunities (sorted by 24h move):
-${JSON.stringify(opportunities, null, 2)}
-
-Rules:
-- Pick ONLY 1 best setup — go all-in, you have very limited capital
-- Prefer: RSI oversold (<30) for longs, RSI overbought (>70) for shorts
-- Use limit orders at support/resistance levels, NOT market orders
-- Set tight stop-loss (2-3% from entry for 10x = 20-30% account risk)
-- Position size: use 2.0-2.5 USDT margin (nearly full balance). Bitget min order is usually ~5 USDT notional, so with 10x leverage 2.5 USDT margin = $25 notional.
-- Prefer coins with high volume and extreme funding rates (arb potential)
-- If nothing looks good, respond with empty trades array
-
-Respond with JSON:
-{
-  "analysis": "<Chinese 2-3 sentence market overview>",
-  "trades": [
-    {
-      "symbol": "XXXUSDT",
-      "side": "buy|sell",
-      "size": "<min contract size>",
-      "orderType": "limit",
-      "price": "<entry price at support/resistance>",
-      "stopLoss": "<price>",
-      "takeProfit": "<price>",
-      "reason": "<Chinese one-line reason>"
-    }
-  ]
-}`;
+  /**
+   * Review and clean up pending limit orders.
+   * Still needed: executor now places limit orders for confidence 60-80.
+   */
+  async function reviewPendingOrders() {
+    if (!config.BITGET_API_KEY) return;
+    console.log('[PendingReview] Reviewing pending orders...');
 
     try {
-      const result = await runAgent('executor', prompt, [], {}, 'Execute technical analysis trades', {
-        trace_id: traceId, max_tokens: 800, timeout: 30000, model: config.AGENT_MODELS?.analyst,
-      });
+      const pendingData = await bitgetRequest('GET', '/api/v2/mix/order/orders-pending?productType=USDT-FUTURES');
+      const allPending = pendingData?.entrustedList || (Array.isArray(pendingData) ? pendingData : []);
 
-      let parsed;
-      try {
-        const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        parsed = JSON.parse(jsonStr);
-      } catch {
-        console.warn('[TechTrading] Parse failed:', result.content.slice(0, 100));
+      const limitOrders = allPending.filter(o => o.orderType !== 'plan');
+      if (!limitOrders.length) {
+        console.log('[PendingReview] No pending limit orders to review');
         return;
       }
+      console.log(`[PendingReview] ${limitOrders.length} pending limit order(s) to review`);
 
-      console.log(`[TechTrading] ${parsed.trades?.length || 0} trades proposed: ${parsed.analysis?.slice(0, 80)}`);
+      let positions = [];
+      try {
+        const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+        positions = Array.isArray(posData) ? posData : (posData?.list || []);
+      } catch {}
 
-      // Execute each trade
-      for (const trade of (parsed.trades || [])) {
-        try {
-          // Set leverage
-          const holdSide = trade.side === 'buy' ? 'long' : 'short';
-          await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
-            symbol: trade.symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT',
-            leverage: '10', holdSide,
-          }).catch(() => {});
+      const positionSymbols = new Set(
+        positions.filter(p => parseFloat(p.total || '0') > 0).map(p => `${p.symbol}_${p.holdSide}`)
+      );
 
-          // Validate LLM output
-          const entryPrice = parseFloat(trade.price);
-          if (!entryPrice || isNaN(entryPrice) || entryPrice <= 0) {
-            console.warn(`[TechTrading] Invalid price for ${trade.symbol}: ${trade.price}, skip`);
-            continue;
+      const symbols = [...new Set(limitOrders.map(o => o.symbol))];
+      const priceMap = {};
+      try {
+        const tickers = await bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
+        if (Array.isArray(tickers)) {
+          for (const t of tickers) {
+            if (symbols.includes(t.symbol)) priceMap[t.symbol] = parseFloat(t.lastPr);
           }
-          if (!trade.side || !['buy', 'sell'].includes(trade.side)) {
-            console.warn(`[TechTrading] Invalid side for ${trade.symbol}: ${trade.side}, skip`);
-            continue;
+        }
+      } catch {}
+
+      const now = Date.now();
+      const ORDER_EXPIRY_MS = 1.5 * 60 * 60 * 1000;
+      const PRICE_DEVIATION_THRESHOLD = 0.025;
+
+      const toCancel = [];
+      const toKeep = [];
+
+      for (const order of limitOrders) {
+        const orderAge = now - parseInt(order.cTime || order.ctime || '0', 10);
+        const orderPrice = parseFloat(order.price);
+        const currentPrice = priceMap[order.symbol];
+        const holdSide = order.side === 'buy' ? 'long' : 'short';
+        const posKey = `${order.symbol}_${holdSide}`;
+
+        let cancelReason = null;
+
+        if (orderAge > ORDER_EXPIRY_MS) {
+          cancelReason = 'expired_90min';
+        } else if (currentPrice && orderPrice > 0) {
+          const deviation = Math.abs(currentPrice - orderPrice) / orderPrice;
+          if (deviation > PRICE_DEVIATION_THRESHOLD) {
+            cancelReason = `price_deviation_${(deviation * 100).toFixed(1)}pct`;
           }
+        }
+        const isOpenOrder = order.tradeSide === 'open' || !order.tradeSide;
+        if (!cancelReason && isOpenOrder && positionSymbols.has(posKey)) {
+          cancelReason = 'duplicate_position';
+        }
 
-          // Calculate proper size in contracts
-          // Bitget size = number of contracts. Notional = size * price. Margin = notional / leverage.
-          // We want to use ~$2.5 margin with 10x leverage = $25 notional. size = 25 / price.
-          const targetNotional = 25; // $2.5 margin * 10x leverage
-          let contractSize = Math.max(1, Math.round(targetNotional / entryPrice));
-          // For high-price assets (BTC, ETH), size is in base units (e.g. 0.001 BTC)
-          if (entryPrice > 100) contractSize = Math.max(parseFloat(trade.size) || 1, +(targetNotional / entryPrice).toFixed(4));
-          const finalSize = String(contractSize);
-          console.log(`[TechTrading] ${trade.symbol} size calc: price=${entryPrice} targetNotional=${targetNotional} → size=${finalSize}`);
-
-          // Place limit order with order-level TP/SL (works before fill, unlike position-level)
-          const orderParams = {
-            symbol: trade.symbol, productType: 'USDT-FUTURES', marginMode: 'crossed',
-            marginCoin: 'USDT', side: trade.side, tradeSide: 'open',
-            orderType: trade.orderType || 'limit', size: finalSize,
-            ...(trade.price ? { price: String(trade.price) } : {}),
-          };
-          // Attach TP/SL at order level so they activate when the order fills
-          if (trade.takeProfit) orderParams.presetStopSurplusPrice = String(trade.takeProfit);
-          if (trade.stopLoss) orderParams.presetStopLossPrice = String(trade.stopLoss);
-
-          const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
-
-          console.log(`[TechTrading] ${holdSide.toUpperCase()} ${trade.symbol} @ ${trade.price || 'market'} | SL:${trade.stopLoss || '-'} TP:${trade.takeProfit || '-'} | orderId: ${order?.orderId}`);
-
-          // Record to both trades and decisions tables (so Risk Agent sees scanner trades)
-          const tradeId = `tech_${order?.orderId || Date.now()}`;
-          try {
-            insertTrade.run(tradeId, 'bitget', trade.symbol, trade.side, entryPrice, parseFloat(finalSize), 0,
-              'open', order?.orderId || '', JSON.stringify({ scanner: true, rsi: trade.rsi, reason: trade.reason }),
-              `Tech: ${trade.reason}`, new Date().toISOString());
-          } catch {}
-          insertDecision.run(new Date().toISOString(), 'executor', 'tech_trade', 'limit-order',
-            JSON.stringify(trade), JSON.stringify(order), `Tech: ${trade.reason}`, '', '', 0, tradeId);
-
-        } catch (err) {
-          console.error(`[TechTrading] ${trade.symbol} failed:`, err.message);
+        if (cancelReason) {
+          toCancel.push({ order, reason: cancelReason });
+        } else {
+          toKeep.push(order);
         }
       }
+
+      // LLM review if 2+ orders remain after auto-cancel
+      let llmCancelIds = new Set();
+      if (toKeep.length >= 2) {
+        console.log(`[PendingReview] ${toKeep.length} orders surviving auto-cancel, asking LLM...`);
+        try {
+          const orderSummary = toKeep.map(o => ({
+            orderId: o.orderId, symbol: o.symbol, side: o.side,
+            orderPrice: parseFloat(o.price), currentPrice: priceMap[o.symbol] || null,
+            size: o.size, ageMinutes: Math.round((now - parseInt(o.cTime || o.ctime || '0', 10)) / 60000),
+          }));
+
+          const prompt = `You are a trading analyst. Review these pending limit orders and decide which to cancel.
+
+Pending orders:
+${JSON.stringify(orderSummary, null, 2)}
+
+Rules:
+- Keep orders where entry price is still close to current market structure
+- Cancel orders where the market has moved strongly away (entry no longer makes sense)
+- Cancel redundant orders for the same symbol/direction
+- Respond with JSON only: { "cancel": ["orderId1", "orderId2"], "reason": "brief explanation in Chinese" }`;
+
+          const result = await runAgent('executor', prompt, [], {}, 'Review pending orders', {
+            max_tokens: 400, timeout: 45000, model: config.AGENT_MODELS?.analyst,
+          });
+
+          const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          const parsed = JSON.parse(jsonStr);
+          llmCancelIds = new Set(parsed.cancel || []);
+          console.log(`[PendingReview] LLM wants to cancel ${llmCancelIds.size} orders: ${parsed.reason}`);
+        } catch (e) {
+          console.warn('[PendingReview] LLM review failed, proceeding with auto-cancel only:', e.message);
+        }
+      }
+
+      const allToCancel = [
+        ...toCancel,
+        ...toKeep.filter(o => llmCancelIds.has(o.orderId)).map(o => ({ order: o, reason: 'llm_review' })),
+      ];
+
+      for (const { order, reason } of allToCancel) {
+        try {
+          await bitgetRequest('POST', '/api/v2/mix/order/cancel-order', {
+            symbol: order.symbol, productType: 'USDT-FUTURES', orderId: order.orderId,
+          });
+          console.log(`[PendingReview] Cancelled ${order.symbol} ${order.side} @ ${order.price} | reason: ${reason}`);
+
+          insertDecision.run(
+            new Date().toISOString(), 'scanner', 'cancel_pending', 'cancel-order',
+            JSON.stringify({ symbol: order.symbol, side: order.side, price: order.price, orderId: order.orderId }),
+            JSON.stringify({ reason }), `Pending order cancelled: ${reason}`, '', '', 0, null
+          );
+
+          await new Promise(r => setTimeout(r, 100));
+        } catch (e) {
+          console.error(`[PendingReview] Cancel failed for ${order.orderId}:`, e.message);
+        }
+      }
+
+      console.log(`[PendingReview] Done. Cancelled: ${allToCancel.length}, Kept: ${limitOrders.length - allToCancel.length}`);
     } catch (err) {
-      console.error('[TechTrading] Agent error:', err.message);
+      console.error('[PendingReview] Error:', err.message);
     }
   }
 
-  return { scanMarketOpportunities };
+  // ──────── Momentum: New Coin Discovery & Research Trading ────────
+
+  /**
+   * Discover new/trending coins on Bitget futures.
+   * Returns array of candidate objects for research.
+   */
+  async function discoverNewCoins() {
+    if (!MOMENTUM?.enabled || !config.BITGET_API_KEY) return [];
+    console.log('[Discovery] Scanning for new/trending coins...');
+
+    try {
+      const tickers = await bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
+      if (!tickers?.length) return [];
+
+      const currentSymbols = new Set(tickers.map(t => t.symbol));
+      const exclude = new Set(MOMENTUM.exclude_symbols);
+
+      // Detect brand new listings (not in our known set)
+      // Skip on first 2 cycles after boot to avoid false positives
+      const newListings = [];
+      if (_knownSymbols.size > 0 && _bootCycles >= 2) {
+        for (const sym of currentSymbols) {
+          if (!_knownSymbols.has(sym) && !exclude.has(sym)) {
+            const t = tickers.find(x => x.symbol === sym);
+            if (t) newListings.push({ symbol: sym, type: 'new_listing', ...parseTicker(t) });
+          }
+        }
+        if (newListings.length > 0) console.log(`[Discovery] ${newListings.length} NEW listings: ${newListings.map(n => n.symbol).join(', ')}`);
+      }
+      _knownSymbols = currentSymbols;
+      _bootCycles++;
+
+      // Find trending coins: high volume + big move, excluding majors
+      const trending = tickers
+        .filter(t => {
+          const vol = parseFloat(t.usdtVolume || 0);
+          const chg = Math.abs(parseFloat(t.change24h || 0));
+          return !exclude.has(t.symbol) && vol > MOMENTUM.volume_threshold && chg > MOMENTUM.change_threshold;
+        })
+        .map(t => ({ symbol: t.symbol, type: 'trending', ...parseTicker(t) }))
+        .sort((a, b) => Math.abs(b.change24h) - Math.abs(a.change24h))
+        .slice(0, 8); // top 8 trending
+
+      const candidates = [...newListings, ...trending];
+      // Deduplicate by symbol
+      const seen = new Set();
+      const unique = candidates.filter(c => {
+        if (seen.has(c.symbol)) return false;
+        seen.add(c.symbol);
+        return true;
+      });
+
+      // Persist to DB
+      const now = new Date().toISOString();
+      for (const c of unique) {
+        try {
+          insertCandidate.run(c.symbol, c.type, c.volume, c.change24h, c.price, c.fundingRate, now);
+        } catch {} // ignore duplicate
+      }
+
+      console.log(`[Discovery] Found ${newListings.length} new + ${trending.length} trending = ${unique.length} candidates`);
+      return unique;
+    } catch (err) {
+      console.error('[Discovery] Error:', err.message);
+      return [];
+    }
+  }
+
+  function parseTicker(t) {
+    return {
+      price: parseFloat(t.lastPr || 0),
+      change24h: parseFloat(t.change24h || 0),
+      volume: parseFloat(t.usdtVolume || 0),
+      fundingRate: parseFloat(t.fundingRate || 0),
+      high24h: parseFloat(t.high24h || 0),
+      low24h: parseFloat(t.low24h || 0),
+    };
+  }
+
+  /**
+   * Run research + trade for discovered candidates.
+   */
+  async function runMomentumPipeline() {
+    if (!MOMENTUM?.enabled || !researcher) return;
+
+    // 1. Discover
+    const candidates = await discoverNewCoins();
+    if (!candidates.length) return;
+
+    // 2. Check how many momentum trades are already open
+    const openMomentum = db.prepare(
+      "SELECT COUNT(*) as cnt FROM trades WHERE status = 'open' AND trade_id LIKE 'res_%'"
+    ).get();
+    if (openMomentum.cnt >= MOMENTUM.max_open) {
+      console.log(`[Momentum] Already ${openMomentum.cnt} open momentum trades (max ${MOMENTUM.max_open}), skip`);
+      return;
+    }
+
+    // 3. Check 24h momentum losses
+    const losses24h = db.prepare(
+      "SELECT COALESCE(SUM(ABS(pnl)), 0) as total_loss FROM trades WHERE status = 'closed' AND pnl < 0 AND trade_id LIKE 'res_%' AND closed_at > datetime('now', '-1 day')"
+    ).get();
+    if (losses24h.total_loss >= MOMENTUM.max_daily_loss) {
+      console.log(`[Momentum] 24h loss $${losses24h.total_loss.toFixed(2)} >= max $${MOMENTUM.max_daily_loss}, pause`);
+      return;
+    }
+
+    // 4. Research top candidates (limit to 3 to save tokens)
+    let slotsAvailable = MOMENTUM.max_open - openMomentum.cnt;
+    const toResearch = candidates.slice(0, Math.min(3, candidates.length));
+
+    for (const candidate of toResearch) {
+      if (slotsAvailable <= 0) break;
+
+      try {
+        const report = await researcher.researchCoin(candidate.symbol, candidate);
+        if (!report) continue;
+
+        // Update candidate record
+        const candidateRow = db.prepare(
+          "SELECT id FROM coin_candidates WHERE symbol = ? ORDER BY discovered_at DESC LIMIT 1"
+        ).get(candidate.symbol);
+        if (candidateRow) {
+          updateCandidateResearch.run(report.total_score, report.verdict, JSON.stringify(report), new Date().toISOString(), candidateRow.id);
+        }
+
+        // 5. Execute if TRADE verdict + score threshold
+        if (report.verdict === 'TRADE' && report.total_score >= MOMENTUM.min_score && report.direction) {
+          const traded = await executeMomentumTrade(candidate.symbol, report);
+          if (traded) {
+            slotsAvailable--;
+            if (candidateRow) markCandidateTraded.run(candidateRow.id);
+          }
+        }
+      } catch (err) {
+        console.error(`[Momentum] ${candidate.symbol} research/trade error:`, err.message);
+      }
+    }
+  }
+
+  /**
+   * Execute a momentum trade based on research report.
+   */
+  async function executeMomentumTrade(symbol, report) {
+    if (!tradingLock || !tradingLock.acquire()) {
+      console.log('[Momentum] Trading lock active, skip');
+      return false;
+    }
+
+    try {
+      const isBuy = report.direction === 'long';
+      const side = isBuy ? 'buy' : 'sell';
+      const holdSide = isBuy ? 'long' : 'short';
+      const leverage = String(MOMENTUM.leverage);
+
+      // Check balance
+      const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
+      const usdtBal = accounts?.find(a => a.marginCoin === 'USDT');
+      const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
+      if (available < MOMENTUM.margin_per_trade) {
+        console.log(`[Momentum] Insufficient margin: $${available.toFixed(2)} < $${MOMENTUM.margin_per_trade}`);
+        return false;
+      }
+
+      // Check no duplicate position
+      try {
+        const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+        const positions = Array.isArray(posData) ? posData : (posData?.list || []);
+        if (positions.find(p => p.symbol === symbol && p.holdSide === holdSide && parseFloat(p.total || '0') > 0)) {
+          console.log(`[Momentum] Already have ${holdSide} on ${symbol}, skip`);
+          return false;
+        }
+      } catch {}
+
+      // Get current price for sizing
+      let currentPrice = 0;
+      try {
+        const ticker = await bitgetRequest('GET', `/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`);
+        const t = Array.isArray(ticker) ? ticker[0] : ticker;
+        currentPrice = parseFloat(t?.lastPr || '0');
+      } catch {}
+      if (!currentPrice) {
+        console.error(`[Momentum] No price for ${symbol}, abort`);
+        return false;
+      }
+
+      // Calculate size: margin * leverage / price
+      const notional = MOMENTUM.margin_per_trade * MOMENTUM.leverage;
+      const size = String(Math.max(parseFloat((notional / currentPrice).toFixed(4)), 0.01));
+
+      // Set leverage
+      await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
+        symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', leverage, holdSide,
+      }).catch(() => {});
+
+      // Build order with TP/SL
+      const orderParams = {
+        symbol, productType: 'USDT-FUTURES', marginMode: 'crossed', marginCoin: 'USDT',
+        side, tradeSide: 'open', orderType: 'market', size,
+      };
+
+      // TP/SL from research report, validate direction
+      if (report.take_profit && report.stop_loss) {
+        const tp = parseFloat(report.take_profit);
+        const sl = parseFloat(report.stop_loss);
+        const valid = isBuy ? (tp > currentPrice && sl < currentPrice) : (tp < currentPrice && sl > currentPrice);
+        if (valid) {
+          orderParams.presetStopSurplusPrice = String(tp);
+          orderParams.presetStopLossPrice = String(sl);
+        }
+      }
+
+      // Place order
+      const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
+      const orderId = order?.orderId;
+
+      console.log(`[Momentum] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x MARKET | score:${report.total_score} | SL:${report.stop_loss || '-'} TP:${report.take_profit || '-'} | orderId: ${orderId}`);
+
+      // Record trade
+      const tradeId = `res_${orderId || Date.now()}`;
+      insertTrade.run(tradeId, 'bitget', symbol, side, currentPrice, parseFloat(size), 0,
+        parseInt(leverage), 'open', orderId || '', JSON.stringify(report),
+        `Momentum: score ${report.total_score}, ${report.reasoning?.slice(0, 100)}`, new Date().toISOString());
+
+      insertDecision.run(new Date().toISOString(), 'researcher', 'momentum_trade', 'place-order',
+        JSON.stringify({ symbol, side, size, leverage, score: report.total_score }),
+        JSON.stringify(order), `Momentum ${holdSide} ${symbol}`, report.reasoning || '', '', report.total_score, tradeId);
+
+      // Fetch fill price after 3s
+      if (orderId) {
+        setTimeout(async () => {
+          try {
+            const detail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${symbol}&productType=USDT-FUTURES&orderId=${orderId}`);
+            const fillPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
+            if (fillPrice > 0) {
+              db.prepare('UPDATE trades SET entry_price = ? WHERE trade_id = ?').run(fillPrice, tradeId);
+              console.log(`[Momentum] Entry price: ${tradeId} @ $${fillPrice}`);
+            }
+          } catch (e) { console.warn(`[Momentum] Fill price fetch failed for ${tradeId}:`, e.message); }
+        }, 3000);
+      }
+
+      return true;
+    } catch (err) {
+      console.error(`[Momentum] ${symbol} trade failed:`, err.message);
+      return false;
+    } finally {
+      tradingLock.release();
+    }
+  }
+
+  return { scanMarketOpportunities, reviewPendingOrders, discoverNewCoins, runMomentumPipeline };
 }

@@ -11,12 +11,13 @@ export function createConfig() {
   const PORT = process.env.PORT || 3200;
   const CRUCIX = process.env.CRUCIX_URL || 'http://localhost:3117';
   const LLM_BASE = process.env.LLM_BASE_URL || 'http://localhost:8080/v1';
-  const LLM_MODEL = process.env.LLM_MODEL || 'gpt-5.4-mini-low-fast';
-  const LLM_KEY = process.env.LLM_API_KEY || 'pwd';
+  const LLM_MODEL = process.env.LLM_MODEL || 'gpt-5.4-mini';
+  const LLM_KEY = process.env.LLM_API_KEY || '';
   const NEWS_TOKEN = process.env.OPENNEWS_TOKEN;
   const NEWS_API = 'https://ai.6551.io';
   const AUTO_TRADE_URL = process.env.AUTO_TRADE_URL || '';
-  const AUTO_TRADE_SECRET = process.env.AUTO_TRADE_SECRET || 'rifi-auto-2026';
+  if (!process.env.AUTO_TRADE_SECRET) console.warn('[Config] WARNING: AUTO_TRADE_SECRET not set in .env');
+  const AUTO_TRADE_SECRET = process.env.AUTO_TRADE_SECRET || '';
 
   // --- Bitget CEX ---
   const BITGET_API_KEY = process.env.BITGET_API_KEY || '';
@@ -31,6 +32,7 @@ export function createConfig() {
     strategist: process.env.LLM_MODEL_STRATEGIST || 'gpt-5.4-mini',
     executor:   process.env.LLM_MODEL_EXECUTOR   || 'gpt-5.4-mini-low-fast',
     reviewer:   process.env.LLM_MODEL_REVIEWER   || 'gpt-5.4-mini',
+    researcher: process.env.LLM_MODEL_RESEARCHER || 'gpt-5.4-mini',
   };
 
   // --- LiFi Cross-Chain ---
@@ -66,6 +68,9 @@ export function createConfig() {
     { type: 'function', name: 'isAllowedTarget', inputs: [{ name: 'target', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   ];
 
+  // StockPulse
+  const SP_BOT_TOKEN = process.env.SP_TELEGRAM_BOT_TOKEN || '';
+
   const PRICE_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
   const ANOMALY_THRESHOLD = 0.02;  // 2% in 5min → instant analysis
   const FLASH_THRESHOLD = 0.05;    // 5% in 5min → FLASH alert
@@ -92,13 +97,28 @@ export function createConfig() {
     symbols: ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],     // tradable symbols
   };
 
+  // --- Momentum: New Coin Research & Trading ---
+  const MOMENTUM = {
+    enabled: true,
+    max_open: 2,                             // max simultaneous momentum trades
+    margin_per_trade: 2.5,                   // USDT margin per trade
+    leverage: 10,
+    min_score: 65,                           // minimum research score to trade
+    volume_threshold: 1_000_000,             // $1M min 24h volume
+    change_threshold: 0.05,                  // 5% min 24h change for "trending"
+    max_daily_loss: 5,                       // USDT, pause if exceeded
+    exclude_symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+    coingecko_api: 'https://api.coingecko.com/api/v3',
+  };
+
   return {
     PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API,
     AUTO_TRADE_URL, AUTO_TRADE_SECRET,
     BITGET_API_KEY, BITGET_SECRET, BITGET_PASS, BITGET_BASE,
-    AGENT_MODELS, SCALING,
+    AGENT_MODELS, SCALING, MOMENTUM,
     LIFI_DIAMOND, SESSION_MANAGER_V2, CHAIN_MAP, CHAIN_OBJECTS, TOKEN_REGISTRY, SM_V2_ABI,
     PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
+    SP_BOT_TOKEN,
   };
 }
