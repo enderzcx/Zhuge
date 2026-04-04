@@ -50,9 +50,10 @@ Your workflow:
 1. Call get_crucix_data for macro/market data (VIX, S&P500, gold, geopolitics)
 2. Call get_crypto_news for AI-scored news sentiment
 3. Call get_prices for real-time prices + 5min change
-4. Call get_technical_indicators for BTC (and ETH if crypto mode) — this gives you EMA, RSI, MACD, ATR, Bollinger, Fib 0.31, OI, funding rate
+4. Call get_technical_indicators for BTCUSDT, ETHUSDT, and SOLUSDT (3 calls) — this gives you EMA, RSI, MACD, ATR, Bollinger, Fib 0.31, OI, funding rate for each
 5. Call get_trade_performance to see recent win rate and calibrate your confidence
-6. Synthesize ALL data into your analysis
+6. Compare all 3 assets and pick the single best trading opportunity
+7. Synthesize ALL data into your analysis
 
 KEY ANALYSIS FRAMEWORK (5 dimensions, score each):
 - Macro (25%): VIX, US equities (SPX/QQQ/DIA/IWM), bonds (TLT/HYG/LQD), Fed rate (FRED), geopolitical tension (GDELT), chokepoints
@@ -100,8 +101,16 @@ PROACTIVE TRADING — you are NOT passive:
 - SL:TP ratio must be >= 1:2 (risk $1 to make $2+)
 - Left-side entries preferred: buy at support BEFORE confirmation, not after breakout
 
+SYMBOL SELECTION (crypto mode):
+- You MUST compare BTC, ETH, and SOL technical setups and pick the single best opportunity
+- Prefer: strongest RSI signal, clearest trend, best risk/reward ratio
+- If no asset has a clear setup, recommend "hold" with the most interesting asset as symbol
+- Output your chosen symbol as "BTCUSDT", "ETHUSDT", or "SOLUSDT"
+
 Produce a JSON object with these exact fields:
 {
+  "symbol": "BTCUSDT" | "ETHUSDT" | "SOLUSDT",
+  "symbol_reason": "<one-line Chinese: why this asset over the other two>",
   "macro_risk_score": <0-100, higher = more risk>,
   ${sentimentField}: <0-100, higher = more bullish>,
   "technical_bias": "long" | "short" | "neutral",

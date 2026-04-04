@@ -151,8 +151,13 @@ Output ONLY the JSON, no other text.`;
       // --- Risk Gate & Graduated Position Scaling ---
       if (mode === 'crypto') {
         if (SCALING?.enabled) {
-          // Run scaling logic for each symbol
-          for (const symbol of SCALING.symbols) {
+          // If analyst specified a symbol, only run scaling for that one;
+          // otherwise fall back to all configured symbols
+          const targetSymbol = parsed.symbol ? parsed.symbol.toUpperCase() : null;
+          const scalingSymbols = targetSymbol && SCALING.symbols.includes(targetSymbol)
+            ? [targetSymbol]
+            : SCALING.symbols;
+          for (const symbol of scalingSymbols) {
             try {
               await _handleScalingForSymbol(symbol, parsed, traceId, now);
             } catch (err) {

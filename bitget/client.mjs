@@ -39,5 +39,41 @@ export function createBitgetClient(config) {
     return data.data;
   }
 
-  return { bitgetSign, bitgetRequest, bitgetPublic };
+  // ── Symbol info cache (tick size / price precision) ──────────────────
+  const _symbolInfoCache = new Map();
+  let _symbolInfoExpiry = 0;
+
+  async function _loadSymbolInfo() {
+    if (Date.now() < _symbolInfoExpiry && _symbolInfoCache.size > 0) return;
+    try {
+      const data = await bitgetPublic('/api/v2/mix/market/contracts?productType=USDT-FUTURES');
+      if (Array.isArray(data)) {
+        for (const s of data) {
+          _symbolInfoCache.set(s.symbol, {
+            pricePlace: parseInt(s.pricePlace || '2', 10),
+            priceEndStep: parseFloat(s.priceEndStep || '1'),
+            volumePlace: parseInt(s.volumePlace || '4', 10),
+          });
+        }
+        _symbolInfoExpiry = Date.now() + 60 * 60 * 1000; // cache 1h
+      }
+    } catch (e) {
+      console.error('[SymbolInfo] Failed to load:', e.message);
+    }
+  }
+
+  /**
+   * Round a price to the exchange's tick size for a given symbol.
+   * Falls back to toPrecision(6) if symbol info unavailable.
+   */
+  async function roundPrice(symbol, price) {
+    await _loadSymbolInfo();
+    const info = _symbolInfoCache.get(symbol);
+    if (!info) return parseFloat(price.toPrecision(6));
+    const step = info.priceEndStep * Math.pow(10, -info.pricePlace);
+    const rounded = Math.round(price / step) * step;
+    return parseFloat(rounded.toFixed(info.pricePlace));
+  }
+
+  return { bitgetSign, bitgetRequest, bitgetPublic, roundPrice };
 }

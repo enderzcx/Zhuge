@@ -5,7 +5,7 @@
 import { calcRSI, calcBollinger } from './indicators.mjs';
 
 export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher }) {
-  const { bitgetPublic, bitgetRequest } = bitgetClient;
+  const { bitgetPublic, bitgetRequest, roundPrice } = bitgetClient;
   const { runAgent } = agentRunner;
   const { insertDecision, insertTrade, insertCandidate, updateCandidateResearch, markCandidateTraded } = db;
   const MOMENTUM = config.MOMENTUM;
@@ -418,16 +418,18 @@ Rules:
       // TP/SL based on actual current price (not LLM's stale price)
       // Long: TP = +3%, SL = -1.5% | Short: TP = -3%, SL = +1.5%
       const tpPct = 0.03, slPct = 0.015;
-      const tp = isBuy ? currentPrice * (1 + tpPct) : currentPrice * (1 - tpPct);
-      const sl = isBuy ? currentPrice * (1 - slPct) : currentPrice * (1 + slPct);
-      orderParams.presetStopSurplusPrice = String(parseFloat(tp.toPrecision(6)));
-      orderParams.presetStopLossPrice = String(parseFloat(sl.toPrecision(6)));
+      const tpRaw = isBuy ? currentPrice * (1 + tpPct) : currentPrice * (1 - tpPct);
+      const slRaw = isBuy ? currentPrice * (1 - slPct) : currentPrice * (1 + slPct);
+      const tp = await roundPrice(symbol, tpRaw);
+      const sl = await roundPrice(symbol, slRaw);
+      orderParams.presetStopSurplusPrice = String(tp);
+      orderParams.presetStopLossPrice = String(sl);
 
       // Place order
       const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
       const orderId = order?.orderId;
 
-      console.log(`[Momentum] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x MARKET @ $${currentPrice} | score:${report.total_score} | SL:$${sl.toPrecision(6)} TP:$${tp.toPrecision(6)} | orderId: ${orderId}`);
+      console.log(`[Momentum] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x MARKET @ $${currentPrice} | score:${report.total_score} | SL:$${sl} TP:$${tp} | orderId: ${orderId}`);
 
       // Record trade
       const tradeId = `res_${orderId || Date.now()}`;

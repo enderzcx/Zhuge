@@ -3,7 +3,7 @@
  */
 
 export function createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer }) {
-  const { bitgetRequest } = bitgetClient;
+  const { bitgetRequest, roundPrice } = bitgetClient;
   const { postMessage } = messageBus;
   const { insertTrade, insertDecision, updateTradeClose,
           insertPositionGroup, insertPositionLevel, updatePositionGroup, closePositionGroup,
@@ -30,18 +30,28 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     try { await _executeBitgetTradeInner(signal, traceId); } finally { tradingLock.release(); }
   }
 
-  function calculateKellySize(available) {
+  function calculateKellySize(available, symbol, currentPrice) {
     // Kelly Criterion: f = (p * b - q) / b
     // p = win rate, q = 1-p, b = avg win / avg loss ratio
-    const closedTrades = db.prepare(`
+    // Filter by symbol if enough data, fallback to all trades
+    let closedTrades = db.prepare(`
       SELECT pnl FROM trades
-      WHERE source = 'bitget' AND status = 'closed' AND entry_price > 0 AND exit_price > 0
+      WHERE source = 'bitget' AND status = 'closed' AND entry_price > 0 AND exit_price > 0 AND pair = ?
       ORDER BY closed_at DESC LIMIT 100
-    `).all();
+    `).all(symbol);
+
+    // Fallback: if < 5 trades for this symbol, use all trades
+    if (closedTrades.length < 5) {
+      closedTrades = db.prepare(`
+        SELECT pnl FROM trades
+        WHERE source = 'bitget' AND status = 'closed' AND entry_price > 0 AND exit_price > 0
+        ORDER BY closed_at DESC LIMIT 100
+      `).all();
+    }
 
     const minSize = 0.01;
 
-    if (closedTrades.length < 5) return minSize; // not enough history
+    if (closedTrades.length < 5) return minSize;
 
     const wins = closedTrades.filter(t => t.pnl > 0);
     const losses = closedTrades.filter(t => t.pnl <= 0);
@@ -66,14 +76,16 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     const halfKelly = kelly * 0.5; // half-Kelly for safety
     const fraction = Math.min(halfKelly, 0.25); // cap at 25%
 
-    // Convert USDT margin → notional → ETH contract size (10x leverage)
-    const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get('ETH-USDT');
-    const ethPrice = candleRow?.close || 2000;
+    // Convert USDT margin → notional → contract size (10x leverage)
+    if (!currentPrice || currentPrice <= 0) {
+      console.warn(`[Kelly] No valid price for ${symbol}, skip trade`);
+      return 0; // caller must check for 0 and abort
+    }
     const usdtMargin = fraction * available;
-    const ethSize = (usdtMargin * 10) / ethPrice; // leverage=10
+    const contractSize = (usdtMargin * 10) / currentPrice; // leverage=10
 
-    const result = Math.max(minSize, parseFloat(Math.min(ethSize, 1.0).toFixed(2)));
-    console.log(`[Kelly] p=${p.toFixed(2)} b=${b.toFixed(2)} f=${kelly.toFixed(3)} half=${fraction.toFixed(3)} → size=${result} ETH (avail=$${available.toFixed(2)})`);
+    const result = Math.max(minSize, parseFloat(contractSize.toFixed(4)));
+    console.log(`[Kelly] ${symbol} p=${p.toFixed(2)} b=${b.toFixed(2)} f=${kelly.toFixed(3)} half=${fraction.toFixed(3)} → size=${result} (avail=$${available.toFixed(2)}, price=$${currentPrice})`);
     return result;
   }
 
@@ -84,19 +96,26 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
     // Trade on actionable signals (Risk Agent already approved)
     if (['hold', 'reduce_exposure'].includes(action)) {
-      console.log(`[BitgetExec] Action "${action}", skip (manage positions manually)`);
+      console.log(`[BitgetExec] Action "${action}", skip`);
       return;
     }
 
-    // Determine trade params — map actions to sides correctly
+    // Determine trade params
     const isBuy = ['strong_buy', 'increase_exposure'].includes(action);
     const side = isBuy ? 'buy' : 'sell';
     const tradeSide = 'open';
     const holdSide = isBuy ? 'long' : 'short';
 
-    // Use ETH futures as default (affordable with small balance)
-    const symbol = 'ETHUSDT';
+    // Symbol from analyst signal — whitelist validated
+    const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
+    const rawSymbol = (signal.symbol || 'ETHUSDT').toUpperCase();
+    const symbol = SUPPORTED_SYMBOLS.includes(rawSymbol) ? rawSymbol : 'ETHUSDT';
+    if (rawSymbol !== symbol) console.warn(`[BitgetExec] Unknown symbol "${signal.symbol}", fallback to ${symbol}`);
     const leverage = '10';
+
+    // Smart order type: confidence >= 80 → market, 60-80 → limit
+    const useLimit = confidence >= 60 && confidence < 80;
+    const orderType = useLimit ? 'limit' : 'market';
 
     try {
       // Check existing positions — don't double up
@@ -110,7 +129,18 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         }
       } catch {}
 
-      // Check balance first
+      // Check pending orders — max 2
+      try {
+        const pendingData = await bitgetRequest('GET', '/api/v2/mix/order/orders-pending?productType=USDT-FUTURES');
+        const allPending = pendingData?.entrustedList || (Array.isArray(pendingData) ? pendingData : []);
+        const pendingCount = allPending.filter(o => o.orderType !== 'plan').length;
+        if (useLimit && pendingCount >= 2) {
+          console.log(`[BitgetExec] Already ${pendingCount} pending orders, skip limit order`);
+          return;
+        }
+      } catch {}
+
+      // Check balance
       const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
       const usdtBal = accounts?.find(a => a.marginCoin === 'USDT');
       const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
@@ -122,38 +152,97 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         return;
       }
 
-      // Dynamic Kelly position sizing
-      const size = String(calculateKellySize(available));
+      // Get current price for Kelly sizing + limit order price
+      let currentPrice = 0;
+      try {
+        const ticker = await bitgetRequest('GET', `/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`);
+        const t = Array.isArray(ticker) ? ticker[0] : ticker;
+        currentPrice = parseFloat(t?.lastPr || '0');
+      } catch {}
+      if (!currentPrice) {
+        const pairMap = { BTCUSDT: 'BTC-USDT', ETHUSDT: 'ETH-USDT', SOLUSDT: 'SOL-USDT' };
+        if (!pairMap[symbol]) {
+          console.error(`[BitgetExec] No price mapping for ${symbol}, abort`);
+          return;
+        }
+        const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get(pairMap[symbol]);
+        currentPrice = candleRow?.close || 0;
+      }
+      if (!currentPrice) {
+        console.error(`[BitgetExec] Cannot get price for ${symbol}, abort trade`);
+        return;
+      }
+
+      // Dynamic Kelly position sizing (per-symbol)
+      const kellySize = calculateKellySize(available, symbol, currentPrice);
+      if (kellySize <= 0) {
+        console.log(`[BitgetExec] Kelly returned 0 for ${symbol}, abort`);
+        return;
+      }
+      const size = String(kellySize);
 
       // Set leverage
       await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
         symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', leverage, holdSide,
       }).catch(() => {});
 
-      // Place order
-      const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', {
+      // Build order params
+      const orderParams = {
         symbol, productType: 'USDT-FUTURES', marginMode: 'crossed', marginCoin: 'USDT',
-        side, tradeSide, orderType: 'market', size,
-      });
+        side, tradeSide, orderType, size,
+      };
+
+      // Limit order: use entry_zone midpoint from analyst, within 1% of current price
+      if (useLimit) {
+        let limitPrice;
+        if (signal.entry_zone && signal.entry_zone.low && signal.entry_zone.high) {
+          const entryMid = (signal.entry_zone.low + signal.entry_zone.high) / 2;
+          const deviation = Math.abs(entryMid - currentPrice) / currentPrice;
+          limitPrice = deviation <= 0.01 ? entryMid : (isBuy ? currentPrice * 0.995 : currentPrice * 1.005);
+        } else {
+          // No entry_zone from analyst — place near current price
+          limitPrice = isBuy ? currentPrice * 0.995 : currentPrice * 1.005;
+        }
+        orderParams.price = String(await roundPrice(symbol, limitPrice));
+      }
+
+      // Attach TP/SL from analyst signal — validate direction
+      if (signal.take_profit && signal.stop_loss) {
+        const tp = parseFloat(signal.take_profit);
+        const sl = parseFloat(signal.stop_loss);
+        const valid = isBuy ? (tp > currentPrice && sl < currentPrice) : (tp < currentPrice && sl > currentPrice);
+        if (valid) {
+          orderParams.presetStopSurplusPrice = String(await roundPrice(symbol, tp));
+          orderParams.presetStopLossPrice = String(await roundPrice(symbol, sl));
+        } else {
+          console.warn(`[BitgetExec] Invalid TP/SL direction for ${holdSide}: TP=${tp} SL=${sl} current=${currentPrice}, skip TP/SL`);
+        }
+      }
+
+      // Place order
+      const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
 
       const orderId = order?.orderId;
-      console.log(`[BitgetExec] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x | orderId: ${orderId}`);
+      const priceInfo = useLimit ? `@ ${orderParams.price}` : '@ market';
+      console.log(`[BitgetExec] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x ${orderType} ${priceInfo} | conf:${confidence} | SL:${signal.stop_loss || '-'} TP:${signal.take_profit || '-'} | orderId: ${orderId}`);
 
-      // Record trade (entry_price=0, updated after fill; leverage stored for pnl_pct)
+      // Record trade
       insertTrade.run(
-        `bg_${orderId}`, 'bitget', `${symbol}`, side, 0, parseFloat(size), 0,
+        `bg_${orderId}`, 'bitget', symbol, side, useLimit ? parseFloat(orderParams.price) : 0, parseFloat(size), 0,
         parseInt(leverage, 10), 'open', orderId || '', JSON.stringify(signal),
-        `${action} conf:${confidence}`, new Date().toISOString()
+        `${action} conf:${confidence} ${orderType}`, new Date().toISOString()
       );
 
-      insertDecision.run(new Date().toISOString(), 'executor', 'bitget_trade', 'place-order', JSON.stringify({ symbol, side, size, leverage }),
-        JSON.stringify(order), `Bitget ${holdSide} ${symbol}`, '', '', confidence, `bg_${orderId}`);
+      insertDecision.run(new Date().toISOString(), 'executor', 'bitget_trade', 'place-order',
+        JSON.stringify({ symbol, side, size, leverage, orderType, price: orderParams.price || 'market' }),
+        JSON.stringify(order), `Bitget ${holdSide} ${symbol} ${orderType}`, '', '', confidence, `bg_${orderId}`);
 
-      postMessage('executor', 'reviewer', 'TRADE_RESULT', { source: 'bitget', orderId, symbol, side, size }, traceId);
+      postMessage('executor', 'reviewer', 'TRADE_RESULT', { source: 'bitget', orderId, symbol, side, size, orderType }, traceId);
 
-      // Fetch actual fill price after market order executes (~3s)
+      // Fetch actual fill price (market: 3s, limit: 60s to allow fill time)
       if (orderId) {
-        setTimeout(() => _fetchAndUpdateEntryPrice(orderId, symbol, `bg_${orderId}`), 3000);
+        const delay = orderType === 'market' ? 3000 : 60000;
+        setTimeout(() => _fetchAndUpdateEntryPrice(orderId, symbol, `bg_${orderId}`), delay);
       }
 
     } catch (err) {
@@ -238,8 +327,9 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
           let entryPrice = trade.entry_price || 0;
 
-          // Fallback: if entry_price=0, fetch from Bitget order detail
-          if (entryPrice === 0 && trade.tx_hash) {
+          // Fetch actual fill price from Bitget — covers limit orders with price improvement
+          // and market orders where initial 3s fetch failed
+          if (trade.tx_hash) {
             try {
               const detail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${trade.pair}&productType=USDT-FUTURES&orderId=${trade.tx_hash}`);
               entryPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
@@ -298,8 +388,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
   function _calcMaxKellySize(available, symbol) {
     const price = _getSymbolPrice(symbol);
     if (!price) return 0.01;
-    // Full Kelly from calculateKellySize logic, but return the raw ETH size (uncapped by ratios)
-    const kellyFull = calculateKellySize(available);
+    // Full Kelly with per-symbol history and current price for correct sizing
+    const kellyFull = calculateKellySize(available, symbol, price);
     // Kelly already returns half-Kelly capped at 25% of equity → that's our max
     return kellyFull;
   }
