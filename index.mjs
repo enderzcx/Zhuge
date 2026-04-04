@@ -73,7 +73,7 @@ const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram 
 const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources });
 const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher });
-const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics });
+const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log });
 
 // --- StockPulse Telegram Bot ---
 const eventBus = { emit() {} }; // lightweight stub, full eventBus not needed for bot
@@ -96,21 +96,21 @@ registerLiFiRoutes(app, lifi);
 // --- Anomaly handler (price spike -> instant analysis) ---
 priceStream.setAnomalyHandler((anomaly) => {
   pipeline.collectAndAnalyze()
-    .catch(err => console.error('[Anomaly] Analysis error:', err.message))
-    .finally(() => scanner.reviewPendingOrders().catch(e => console.error('[PendingReview] Error:', e.message)));
+    .catch(err => log.error('anomaly_analysis_error', { module: 'index', error: err.message }))
+    .finally(() => scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message })));
 });
 
 // --- Start ---
 app.listen(config.PORT, () => {
-  console.log(`[VPS-API] Running on :${config.PORT} | LLM: ${config.LLM_MODEL} | Mode: crypto | Interval: 30min | DB: data/rifi.db`);
+  log.info('server_started', { module: 'index', port: config.PORT, model: config.LLM_MODEL, interval: '30min' });
   const runAnalysis = () => pipeline.collectAndAnalyze()
-    .finally(() => scanner.reviewPendingOrders().catch(e => console.error('[PendingReview] Error:', e.message)));
+    .finally(() => scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message })));
   runAnalysis();
   setInterval(runAnalysis, 30 * 60 * 1000); // 30min (was 15min, saves ~50% tokens)
   // Check for filled/closed positions every 5 minutes + review pending orders
   setInterval(() => {
-    bitgetExec.checkAndSyncTrades().catch(e => console.error('[TradeSync] Error:', e.message));
-    scanner.reviewPendingOrders().catch(e => console.error('[PendingReview] Error:', e.message));
+    bitgetExec.checkAndSyncTrades().catch(e => log.error('trade_sync_error', { module: 'index', error: e.message }));
+    scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
   }, 5 * 60 * 1000);
   priceStream.connectOKXWebSocket();
   spBot.start(); // StockPulse TG bot polling

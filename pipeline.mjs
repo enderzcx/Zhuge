@@ -5,10 +5,12 @@
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
-export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics }) {
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog }) {
 
   const { runAgent, agentMetrics } = agentRunner;
   const _metrics = metrics || { record() {} }; // fallback if not provided
+  const _noop = () => {};
+  const log = _extLog || { info: _noop, warn: _noop, error: _noop, debug: _noop };
   const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
   const { runRiskCheck } = riskAgent;
   const { executeBitgetTrade, openScoutPosition, scaleUpPosition, abandonPosition,
@@ -124,7 +126,8 @@ Output ONLY the JSON, no other text.`;
         const jsonStr = analystResult.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         parsed = JSON.parse(jsonStr);
       } catch {
-        console.error(`[Analyst:${mode}] JSON parse failed, raw:`, analystResult.content.slice(0, 200));
+        log.error('analyst_json_parse_failed', { module: 'pipeline', mode, raw: analystResult.content.slice(0, 200) });
+        _metrics.record('error_count', 1, { module: 'pipeline', type: 'json_parse' });
         c.analyzing = false;
         return;
       }
@@ -141,7 +144,7 @@ Output ONLY the JSON, no other text.`;
 
       const sentimentKey = mode === 'stock' ? 'stock_sentiment' : 'crypto_sentiment';
       const sentimentVal = parsed[sentimentKey] || 0;
-      console.log(`[${now}] ${mode} analyst | Risk:${parsed.macro_risk_score} ${sentimentKey}:${sentimentVal} Bias:${parsed.technical_bias} Action:${parsed.recommended_action} Push:${parsed.push_worthy} Tools:${analystResult.toolCalls.length}`);
+      log.info('analyst_result', { module: 'pipeline', mode, risk: parsed.macro_risk_score, sentiment: sentimentVal, bias: parsed.technical_bias, action: parsed.recommended_action, push: parsed.push_worthy, tools: analystResult.toolCalls.length });
 
       // Persist to SQLite
       persistAnalysis(mode, parsed, now);
@@ -168,7 +171,7 @@ Output ONLY the JSON, no other text.`;
             try {
               await _handleScalingForSymbol(symbol, parsed, traceId, now);
             } catch (err) {
-              console.error(`[Scaling:${symbol}] Error:`, err.message);
+              log.error('scaling_error', { module: 'scaling', symbol, error: err.message });
             }
           }
         } else {
@@ -178,13 +181,13 @@ Output ONLY the JSON, no other text.`;
           if (shouldTrade) {
             const riskVerdict = await runRiskCheck(parsed, traceId);
             if (riskVerdict.pass) {
-              executeBitgetTrade(parsed, traceId).catch(err => console.error('[BitgetExec] Error:', err.message));
+              executeBitgetTrade(parsed, traceId).catch(err => log.error('bitget_exec_error', { module: 'pipeline', error: err.message }));
               if (config.AUTO_TRADE_URL) {
                 triggerAutoTrade({ ...parsed, trace_id: traceId, risk_verdict: riskVerdict })
-                  .catch(err => console.error('[AutoTrade] Trigger failed:', err.message));
+                  .catch(err => log.error('auto_trade_trigger_failed', { module: 'pipeline', error: err.message }));
               }
             } else {
-              console.log(`[Risk] VETO: ${riskVerdict.reason}`);
+              log.warn('risk_veto', { module: 'pipeline', reason: riskVerdict.reason });
               try {
                 insertDecision.run(now, 'risk', 'veto', '', '', JSON.stringify(riskVerdict),
                   'Auto-trade blocked by Risk agent', riskVerdict.reason, '', 0, null);
@@ -196,25 +199,26 @@ Output ONLY the JSON, no other text.`;
 
       // --- Strategist Agent (crypto only, evaluate active strategies) ---
       if (mode === 'crypto') {
-        runStrategistCheck(parsed, traceId).catch(err => console.error('[Strategist] Error:', err.message));
+        runStrategistCheck(parsed, traceId).catch(err => log.error('strategist_error', { module: 'pipeline', error: err.message }));
       }
 
       // Patrol report: accumulate and push every 3h (per mode)
       c.patrolHistory.push({ ...parsed, timestamp: now });
       c.patrolCounter++;
       if (c.patrolCounter >= PATROL_INTERVAL) {
-        pushPatrolReport(mode, c.patrolHistory).catch(err => console.error(`[Patrol:${mode}] Error:`, err.message));
+        pushPatrolReport(mode, c.patrolHistory).catch(err => log.error('patrol_error', { module: 'patrol', mode, error: err.message }));
         // Run Reviewer alongside patrol (every 3h)
         if (mode === 'crypto') {
-          runReview(traceId).catch(err => console.error('[Reviewer] Error:', err.message));
+          runReview(traceId).catch(err => log.error('reviewer_error', { module: 'pipeline', error: err.message }));
           // Check if weekly review is due (self-healing: checks on every patrol cycle)
-          runWeeklyReview(traceId).catch(err => console.error('[WeeklyReview] Error:', err.message));
+          runWeeklyReview(traceId).catch(err => log.error('weekly_review_error', { module: 'pipeline', error: err.message }));
         }
         c.patrolHistory = [];
         c.patrolCounter = 0;
       }
     } catch (err) {
-      console.error(`[Analysis:${mode}] Error:`, err.message);
+      log.error('analysis_error', { module: 'pipeline', mode, error: err.message });
+      _metrics.record('error_count', 1, { module: 'pipeline', type: 'analysis' });
     }
     c.analyzing = false;
   }
@@ -250,7 +254,7 @@ ${summary}
       const result = await llm([{ role: 'user', content: prompt }], { max_tokens: 400, timeout: 20000 });
       return result.content;
     } catch (err) {
-      console.error(`[Patrol:${mode}] Report generation failed:`, err.message);
+      log.error('patrol_report_gen_failed', { module: 'patrol', mode, error: err.message });
       const latest = history[history.length - 1];
       return `过去3小时完成${history.length}次${mode === 'stock' ? '美股' : '加密'}市场扫描。最新状态：风险${latest.macro_risk_score}/100，情绪${latest[sentimentKey] || 0}/100，偏向${latest.technical_bias}，建议${latest.recommended_action}。未执行交易。`;
     }
@@ -297,9 +301,10 @@ ${summary}
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(10000),
         });
-        console.log(`[Patrol:${mode}] 3h report pushed (${history.length} scans)`);
+        log.info('patrol_pushed', { module: 'patrol', mode, scans: history.length });
+        _metrics.record('push_sent', 1, { level: 'PATROL' });
       } catch (err) {
-        console.error(`[Patrol:${mode}] Push failed: ${err.message}`);
+        log.error('patrol_push_failed', { module: 'patrol', mode, error: err.message });
       }
     }
   }
@@ -313,7 +318,7 @@ ${summary}
   async function triggerAutoTrade(signal) {
     const traceId = signal.trace_id || `trade_${Date.now()}`;
     const riskVerdict = signal.risk_verdict;
-    console.log(`[Executor] Push-worthy signal -> Risk: ${riskVerdict?.pass ? 'PASS' : 'N/A'} | ${signal.push_reason || 'high-value'}`);
+    log.info('executor_trigger', { module: 'pipeline', risk: riskVerdict?.pass ? 'PASS' : 'N/A', reason: signal.push_reason || 'high-value' });
     try {
       const res = await fetch(config.AUTO_TRADE_URL, {
         method: 'POST',
@@ -322,26 +327,30 @@ ${summary}
         signal: AbortSignal.timeout(60000),
       });
       const data = await res.json();
-      console.log(`[Executor] Response: ${data.status} | Tools: ${data.tool_calls || 0}`);
+      log.info('executor_response', { module: 'pipeline', status: data.status, tools: data.tool_calls || 0 });
       bus.postMessage('executor', 'reviewer', 'TRADE_RESULT', data, traceId);
     } catch (err) {
-      console.error(`[Executor] Failed: ${err.message}`);
+      log.error('executor_failed', { module: 'pipeline', error: err.message });
     }
   }
 
   async function collectAndAnalyze() {
-    console.log(`[${new Date().toISOString()}] Collecting data...`);
+    log.info('collecting_data', { module: 'pipeline' });
+    const _collectStart = Date.now();
 
     // Scanner: broad market scan for logging/monitoring (analyst uses its own tools for BTC/ETH/SOL)
     let marketScanCount = 0;
     try {
       const opps = await scanMarketOpportunities();
       marketScanCount = opps.length;
-    } catch (e) { console.error('[Scanner] Error:', e.message); }
+    } catch (e) { log.error('scanner_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'scanner' }); }
 
+    const _fetchStart = Date.now();
     const [crucix, news] = await Promise.all([fetchCrucix(), fetchNews()]);
     const newsCount = Array.isArray(news) ? news.length : 0;
-    console.log(`[${new Date().toISOString()}] Data collected. Crucix:${!!crucix} News:${newsCount} MarketScan:${marketScanCount}. Running analysis...`);
+    _metrics.record('data_collect_ms', Date.now() - _fetchStart, { news: newsCount });
+    _metrics.record('collect_cycle_ms', Date.now() - _collectStart, { news: newsCount, scan: marketScanCount });
+    log.info('data_collected', { module: 'pipeline', crucix: !!crucix, news: newsCount, marketScan: marketScanCount });
 
     // Persist raw news
     if (newsCount > 0) persistNews(news);
@@ -351,16 +360,16 @@ ${summary}
     // await runFullAnalysis('stock', crucix, news);
 
     // Score historical signals (non-blocking)
-    try { scoreHistoricalSignals(); } catch (e) { console.error('[SignalScore] Error:', e.message); }
+    try { scoreHistoricalSignals(); } catch (e) { log.error('signal_score_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'signal_score' }); }
 
     // Update source scores monthly
-    try { updateSourceScores(); } catch (e) { console.error('[SourceScore] Error:', e.message); }
+    try { updateSourceScores(); } catch (e) { log.error('source_score_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'source_score' }); }
 
     // Check alert conditions
-    try { checkAlerts(); } catch (e) { console.error('[Alerts] Error:', e.message); }
+    try { checkAlerts(); } catch (e) { log.error('alerts_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'alerts' }); }
 
     // Momentum: discover + research + trade new/trending coins
-    try { await scanner.runMomentumPipeline(); } catch (e) { console.error('[Momentum] Error:', e.message); }
+    try { await scanner.runMomentumPipeline(); } catch (e) { log.error('momentum_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'momentum' }); }
   }
 
   // --- Graduated Scaling: per-symbol decision logic ---
@@ -374,7 +383,7 @@ ${summary}
     const currentPrice = candleRow?.close || 0;
 
     if (!currentPrice) {
-      console.log(`[Scaling:${symbol}] No price data, skip`);
+      log.warn('scaling_no_price', { module: 'scaling', symbol });
       return;
     }
 
@@ -385,7 +394,7 @@ ${summary}
 
       // Check abandon first (stop-loss or strong reversal)
       if (checkAbandonConditions(activeGroup, signal, currentPrice)) {
-        console.log(`[Scaling:${symbol}] Abandon triggered (L${activeGroup.current_level})`);
+        log.warn('scaling_abandon', { module: 'scaling', symbol, level: activeGroup.current_level });
         await abandonPosition(activeGroup, traceId);
         return;
       }
@@ -398,10 +407,10 @@ ${summary}
         if (riskVerdict.pass) {
           const result = await scaleUpPosition(activeGroup, signal, traceId);
           if (result) {
-            console.log(`[Scaling:${symbol}] Scaled to L${result.level} | +${result.size} | avgEntry=$${result.avgEntry?.toFixed(2)}`);
+            log.info('scaling_up', { module: 'scaling', symbol, level: result.level, size: result.size, avgEntry: result.avgEntry });
           }
         } else {
-          console.log(`[Scaling:${symbol}] ScaleUp VETO (L${nextLevel}): ${riskVerdict.reason}`);
+          log.warn('scaling_veto', { module: 'scaling', symbol, level: nextLevel, reason: riskVerdict.reason });
         }
       }
     } else {
@@ -415,10 +424,10 @@ ${summary}
         if (riskVerdict.pass) {
           const result = await openScoutPosition(symbol, signal, traceId);
           if (result) {
-            console.log(`[Scaling:${symbol}] Scout opened: L0 ${result.holdSide} ${result.size}`);
+            log.info('scout_opened', { module: 'scaling', symbol, side: result.holdSide, size: result.size });
           }
         } else {
-          console.log(`[Scaling:${symbol}] Scout VETO: ${riskVerdict.reason}`);
+          log.warn('scout_veto', { module: 'scaling', symbol, reason: riskVerdict.reason });
           try {
             insertDecision.run(now, 'risk', 'scout_veto', '', '', JSON.stringify(riskVerdict),
               `Scout blocked for ${symbol}`, riskVerdict.reason, '', confidence, null);

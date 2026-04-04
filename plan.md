@@ -339,12 +339,12 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 ## Phases
 
 ### Phase 1: Foundation — 可观测性 + 数据修复
-- [ ] observe/metrics.mjs — SQLite metrics 表 + 采集函数
-- [ ] observe/logger.mjs — 结构化日志
-- [ ] observe/health.mjs — 系统资源采集
-- [ ] pipeline.mjs 接入 logger + metrics
-- [ ] data-sources.mjs 保留 news URL
-- [ ] db.mjs 新增 metrics / push_history 表
+- [x] observe/metrics.mjs — SQLite metrics 表 + 采集函数
+- [x] observe/logger.mjs — 结构化日志
+- [x] observe/health.mjs — 系统资源采集
+- [x] pipeline.mjs 接入 logger + metrics
+- [x] data-sources.mjs 保留 news URL
+- [x] db.mjs 新增 metrics / push_history 表
 - [ ] 部署验证: `deploy.sh`, 确认 metrics 写入正常
 
 ### Phase 2: TG Agent — 核心智能体
