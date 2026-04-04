@@ -415,22 +415,19 @@ Rules:
         side, tradeSide: 'open', orderType: 'market', size,
       };
 
-      // TP/SL from research report, validate direction
-      if (report.take_profit && report.stop_loss) {
-        const tp = parseFloat(report.take_profit);
-        const sl = parseFloat(report.stop_loss);
-        const valid = isBuy ? (tp > currentPrice && sl < currentPrice) : (tp < currentPrice && sl > currentPrice);
-        if (valid) {
-          orderParams.presetStopSurplusPrice = String(tp);
-          orderParams.presetStopLossPrice = String(sl);
-        }
-      }
+      // TP/SL based on actual current price (not LLM's stale price)
+      // Long: TP = +3%, SL = -1.5% | Short: TP = -3%, SL = +1.5%
+      const tpPct = 0.03, slPct = 0.015;
+      const tp = isBuy ? currentPrice * (1 + tpPct) : currentPrice * (1 - tpPct);
+      const sl = isBuy ? currentPrice * (1 - slPct) : currentPrice * (1 + slPct);
+      orderParams.presetStopSurplusPrice = String(parseFloat(tp.toPrecision(6)));
+      orderParams.presetStopLossPrice = String(parseFloat(sl.toPrecision(6)));
 
       // Place order
       const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
       const orderId = order?.orderId;
 
-      console.log(`[Momentum] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x MARKET | score:${report.total_score} | SL:${report.stop_loss || '-'} TP:${report.take_profit || '-'} | orderId: ${orderId}`);
+      console.log(`[Momentum] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x MARKET @ $${currentPrice} | score:${report.total_score} | SL:$${sl.toPrecision(6)} TP:$${tp.toPrecision(6)} | orderId: ${orderId}`);
 
       // Record trade
       const tradeId = `res_${orderId || Date.now()}`;
