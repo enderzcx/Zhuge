@@ -181,7 +181,7 @@ app.listen(config.PORT, () => {
     agentBot.startPolling();
     log.info('agent_bot_started', { module: 'index' });
     // Dashboard: scheduled TG posts (positions, observe, charts)
-    const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log, dataSources });
+    const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log, dataSources, llm });
     dashboard.start();
     // Primary Market: Base V3 pool listener (Phase 5)
     const primaryMarket = createPrimaryMarket({ config, pushEngine, tgCall: agentBot.tgCall, log, metrics });

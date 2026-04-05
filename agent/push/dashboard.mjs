@@ -15,11 +15,23 @@ const POSITIONS_INTERVAL = 5 * 60 * 1000;  // 5 min
 const OBSERVE_INTERVAL = 30 * 60 * 1000;    // 30 min
 const CHART_INTERVAL = 6 * 60 * 60 * 1000;  // 6 h
 
-export function createDashboard({ config, db, tgCall, health, metrics, log, dataSources }) {
+export function createDashboard({ config, db, tgCall, health, metrics, log, dataSources, llm }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const chatId = config.TG_DASHBOARD_CHAT || config.TG_CHAT_ID;
   const timers = [];
   let pinnedPositionMsgId = null;
+
+  // --- Translation helper ---
+  async function _translate(text) {
+    if (!llm || !text) return text;
+    try {
+      const result = await llm(
+        [{ role: 'user', content: `翻译成简洁的中文，保留关键地名/人名/数字，不要加任何解释，直接输出翻译：\n\n${text.slice(0, 500)}` }],
+        { max_tokens: 300, timeout: 15000 }
+      );
+      return (result.content || result || text).trim();
+    } catch { return text; } // fallback to original if LLM fails
+  }
 
   // --- Topic thread IDs (set if using supergroup with topics) ---
   const topics = {
@@ -269,7 +281,9 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
           arr.slice(0, 100).forEach(h => seenUrgentHashes.delete(h));
         }
 
-        const text = `⚡ TG URGENT [${item.channel || '?'}]\n\n${(item.text || '').slice(0, 800)}`;
+        const raw = (item.text || '').slice(0, 500);
+        const translated = await _translate(raw);
+        const text = `⚡ 快讯 [${item.channel || '?'}]\n\n${translated}`;
         await _send(text, 'news');
       }
     } catch (err) {
@@ -295,11 +309,17 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
 
       if (relevant.length === 0) return;
 
-      const lines = ['📰 News Digest', ''];
+      // Batch translate headlines
+      const headlines = relevant.map(n => n.headline || n.title).join('\n');
+      const translated = await _translate(headlines);
+      const translatedLines = translated.split('\n');
+
+      const lines = ['📰 新闻摘要', ''];
       relevant.forEach((n, i) => {
         const flag = n.urgent ? '🔴' : '📄';
         const region = n.region ? ` [${n.region}]` : '';
-        lines.push(`${flag} ${n.headline || n.title}${region}`);
+        const title = translatedLines[i] || n.headline || n.title;
+        lines.push(`${flag} ${title}${region}`);
         lines.push(`   ${n.source || ''} | ${n.url}`);
       });
       lines.push(`\n🕐 ${new Date().toISOString().slice(11, 16)} UTC`);
