@@ -117,7 +117,7 @@ export function createConfig() {
     min_score: 60,                           // minimum research score to trade (lowered for momentum strategy)
     volume_threshold: 1_000_000,             // $1M min 24h volume
     change_threshold: 0.05,                  // 5% min 24h change for "trending"
-    max_daily_loss: 5,                       // USDT, pause if exceeded
+    max_daily_loss: 10,                      // USDT, pause if exceeded (~20% of equity)
     exclude_symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
     coingecko_api: 'https://api.coingecko.com/api/v3',
   };

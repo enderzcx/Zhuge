@@ -54,12 +54,20 @@ export function createAgentRunner({ config, db, messageBus }) {
       }
 
       const start = Date.now();
-      const res = await fetch(`${config.LLM_BASE}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.LLM_KEY}` },
-        body: JSON.stringify(reqBody),
-        signal: AbortSignal.timeout(opts.timeout || 30000),
-      });
+      const _doFetch = async (attempt = 0) => {
+        const r = await fetch(`${config.LLM_BASE}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.LLM_KEY}` },
+          body: JSON.stringify(reqBody),
+          signal: AbortSignal.timeout(opts.timeout || 30000),
+        });
+        if ((r.status === 402 || r.status === 429) && attempt < 2) {
+          await new Promise(ok => setTimeout(ok, 3000 * (attempt + 1)));
+          return _doFetch(attempt + 1);
+        }
+        return r;
+      };
+      const res = await _doFetch();
       if (!res.ok) throw new Error(`LLM ${res.status}`);
       const data = await res.json();
       const msg = data.choices?.[0]?.message;
