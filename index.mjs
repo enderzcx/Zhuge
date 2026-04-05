@@ -43,9 +43,11 @@ import { createConfirmHandler } from './agent/telegram/confirm.mjs';
 import { createAgentBot } from './agent/telegram/bot.mjs';
 import { createProvenance } from './agent/cognition/provenance.mjs';
 import { createCompound } from './agent/cognition/compound.mjs';
+// Push Engine (Phase 3)
+import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
 // StockPulse Telegram Bot (deprecated, kept for backward compat if AGENT_BOT not configured)
 import { createLLMQueue } from './stockpulse/llm-queue.mjs';
-import { createPushEngine } from './stockpulse/push-engine.mjs';
+import { createPushEngine as createSPPushEngine } from './stockpulse/push-engine.mjs';
 import { createAIAnalyst } from './stockpulse/ai-analyst.mjs';
 import { createStockPulseBot } from './stockpulse/telegram-bot.mjs';
 // Route registrars
@@ -122,7 +124,6 @@ const agentBot = createAgentBot({
 confirmHandler.setTgCall(agentBot.tgCall);
 
 // --- Push Engine (Phase 3) ---
-import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
 const tgSend = (text) => agentBot.sendMessage(config.TG_CHAT_ID, text);
 pushEngine = createSmartPush({ db, config, tgSend, log, metrics });
 _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
@@ -133,9 +134,9 @@ const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, b
 // --- StockPulse Telegram Bot (deprecated — only starts if agent bot token not set) ---
 const eventBus = { emit() {} };
 const llmQueue = createLLMQueue({ llm, eventBus });
-const pushEngine = createPushEngine({ db, config });
+const spPushEngine = createSPPushEngine({ db, config });
 const aiAnalyst = createAIAnalyst({ llmQueue, db, config });
-const spBot = createStockPulseBot({ config, pushEngine, aiAnalyst, dataSources });
+const spBot = createStockPulseBot({ config, pushEngine: spPushEngine, aiAnalyst, dataSources });
 
 // --- Register routes ---
 registerAnalysisRoutes(app, { cache, agentMetrics: agentRunner.agentMetrics, priceStream, config, pipeline, db, signals });
