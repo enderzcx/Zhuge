@@ -161,6 +161,15 @@ registerMarketRoutes(app, { db, priceStream });
 registerBitgetRoutes(app, { bitgetClient });
 registerLiFiRoutes(app, lifi);
 
+// --- Graceful shutdown ---
+process.on('SIGTERM', () => {
+  log.info('shutdown', { module: 'index', signal: 'SIGTERM' });
+  agentBot.stop?.();
+  health.stop?.();
+  try { db.db.close(); } catch {}
+  process.exit(0);
+});
+
 // --- Anomaly handler (price spike -> instant analysis) ---
 priceStream.setAnomalyHandler((anomaly) => {
   pipeline.collectAndAnalyze()

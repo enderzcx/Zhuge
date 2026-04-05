@@ -21,6 +21,16 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
   const timers = [];
   let pinnedPositionMsgId = null;
 
+  // Pre-compiled statements (avoid re-preparing every interval)
+  const stmts = {
+    openTrades: db.prepare("SELECT pair, side, leverage, entry_price, amount FROM trades WHERE status = 'open'"),
+    tradeStats: db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, SUM(pnl) as total_pnl FROM trades WHERE status = 'closed' AND pnl != 0"),
+    llmStats: db.prepare("SELECT COUNT(*) as cnt, AVG(value) as avg FROM metrics WHERE name = 'llm_latency_ms' AND ts > ?"),
+    errorStats: db.prepare("SELECT SUM(value) as total FROM metrics WHERE name = 'error_count' AND ts > ?"),
+    pnlTrades: db.prepare("SELECT pnl, closed_at FROM trades WHERE status = 'closed' AND pnl != 0 ORDER BY closed_at ASC"),
+    compoundRules: db.prepare("SELECT description, action, confidence FROM compound_rules WHERE status = 'active' ORDER BY confidence DESC LIMIT 5"),
+  };
+
   // --- LLM helpers ---
 
   async function _translate(text) {
@@ -57,8 +67,8 @@ ${numbered}
         { max_tokens: 50, timeout: 10000 }
       );
       const answer = (result.content || result || '').trim();
-      if (answer === 'none') return [];
-      const keepIds = answer.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      if (answer === 'none' || answer.toLowerCase().includes('none')) return [];
+      const keepIds = [...answer.matchAll(/\d+/g)].map(m => parseInt(m[0])).filter(n => n > 0 && n <= items.length);
       return items.filter((_, i) => keepIds.includes(i + 1));
     } catch { return items; } // on error, pass through all
   }
@@ -111,26 +121,8 @@ ${numbered}
 
   async function postPositions() {
     try {
-      // Fetch positions from Bitget via existing API
-      const { execSync } = await import('child_process');
-
-      // Get positions data from DB
-      const openTrades = db.prepare(
-        "SELECT pair, side, leverage, entry_price, amount FROM trades WHERE status = 'open'"
-      ).all();
-
-      // Get balance from recent metrics
-      const heapMb = db.prepare(
-        "SELECT value FROM metrics WHERE name = 'system_rss_mb' ORDER BY ts DESC LIMIT 1"
-      ).get();
-
-      // Get PnL stats
-      const stats = db.prepare(`
-        SELECT COUNT(*) as total,
-          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-          SUM(pnl) as total_pnl
-        FROM trades WHERE status = 'closed' AND pnl != 0
-      `).get();
+      const openTrades = stmts.openTrades.all();
+      const stats = stmts.tradeStats.get();
 
       const winRate = stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : '0';
 
@@ -174,16 +166,10 @@ ${numbered}
 
       let llmCalls = 0, llmAvgMs = 0, errorCount = 0;
       try {
-        const llmStats = db.prepare(
-          "SELECT COUNT(*) as cnt, AVG(value) as avg FROM metrics WHERE name = 'llm_latency_ms' AND ts > ?"
-        ).get(hour);
-        llmCalls = llmStats?.cnt || 0;
-        llmAvgMs = Math.round(llmStats?.avg || 0);
-
-        const errors = db.prepare(
-          "SELECT SUM(value) as total FROM metrics WHERE name = 'error_count' AND ts > ?"
-        ).get(hour);
-        errorCount = errors?.total || 0;
+        const llmS = stmts.llmStats.get(hour);
+        llmCalls = llmS?.cnt || 0;
+        llmAvgMs = Math.round(llmS?.avg || 0);
+        errorCount = stmts.errorStats.get(hour)?.total || 0;
       } catch {}
 
       const text = [
@@ -219,9 +205,7 @@ ${numbered}
       // Show current active rules
       ...(() => {
         try {
-          const rules = db.prepare(
-            "SELECT description, action, confidence FROM compound_rules WHERE status = 'active' ORDER BY confidence DESC LIMIT 5"
-          ).all();
+          const rules = stmts.compoundRules.all();
           return rules.map(r => {
             const icon = r.action === 'avoid' ? '⚠' : r.action === 'prefer' ? '✓' : '~';
             return `${icon} ${r.description} (${(r.confidence * 100).toFixed(0)}%)`;
@@ -237,11 +221,7 @@ ${numbered}
 
   async function postPnLChart() {
     try {
-      const trades = db.prepare(`
-        SELECT pnl, closed_at FROM trades
-        WHERE status = 'closed' AND pnl != 0
-        ORDER BY closed_at ASC
-      `).all();
+      const trades = stmts.pnlTrades.all();
       if (trades.length < 3) return;
 
       // Cumulative PnL

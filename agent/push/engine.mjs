@@ -91,6 +91,9 @@ export function createPushEngine({ db, config, tgSend, tgCall, log, metrics }) {
    * Push a TRADE event (position opened/closed).
    */
   async function pushTrade({ action, symbol, side, leverage, price, pnl, traceId }) {
+    const key = _dedupKey('TRADE', `${action}:${symbol}:${side}`);
+    if (_isDuplicate(key)) return null;
+
     const icon = action === 'open' ? '📊' : pnl >= 0 ? '💰' : '📉';
     const actionText = action === 'open' ? 'OPEN' : 'CLOSE';
     const pnlText = pnl !== undefined ? ` | PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT` : '';

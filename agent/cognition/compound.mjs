@@ -214,6 +214,27 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
    * Higher confidence rules take priority.
    * @returns {{ leverage?: number, tp_pct?: number, sl_pct?: number, ... }}
    */
+  // Bounds for AI-set parameters (prevent hallucinated extreme values)
+  const PARAM_BOUNDS = {
+    leverage: [1, 20],
+    tp_pct: [0.01, 0.15],
+    sl_pct: [0.005, 0.1],
+    margin_per_trade: [0.5, 20],
+    min_score: [40, 90],
+    max_daily_loss: [2, 50],
+    max_open: [1, 10],
+  };
+
+  function _clampParams(changes) {
+    const clamped = {};
+    for (const [k, v] of Object.entries(changes)) {
+      if (PARAM_BOUNDS[k] && typeof v === 'number') {
+        clamped[k] = Math.min(Math.max(v, PARAM_BOUNDS[k][0]), PARAM_BOUNDS[k][1]);
+      }
+    }
+    return clamped;
+  }
+
   function getParamOverrides() {
     try {
       const rules = db.prepare(
@@ -223,7 +244,7 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
       for (const r of rules) {
         try {
           const changes = JSON.parse(r.param_changes_json || '{}');
-          Object.assign(merged, changes); // later (higher confidence) overwrites earlier
+          Object.assign(merged, _clampParams(changes));
         } catch {}
       }
       return merged;

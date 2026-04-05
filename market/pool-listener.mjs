@@ -47,6 +47,10 @@ export function createPoolListener({ config, log, onNewPool }) {
   }
 
   function _connect() {
+    // Cleanup previous connection
+    try { if (unwatch) { unwatch(); unwatch = null; } } catch {}
+    try { if (client?.transport?.close) client.transport.close(); } catch {}
+
     try {
       client = createPublicClient({
         chain: base,

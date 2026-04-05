@@ -299,6 +299,9 @@ Rules:
   async function runMomentumPipeline() {
     if (!MOMENTUM?.enabled || !researcher) return;
 
+    // Compound param overrides (AI-decided parameters)
+    const _overrides = compound?.getParamOverrides?.() || {};
+
     // 1. Discover
     const candidates = await discoverNewCoins();
     if (!candidates.length) return;
@@ -317,7 +320,6 @@ Rules:
     const losses24h = db.prepare(
       "SELECT COALESCE(SUM(ABS(pnl)), 0) as total_loss FROM trades WHERE status = 'closed' AND pnl < 0 AND trade_id LIKE 'res_%' AND closed_at > datetime('now', '-1 day')"
     ).get();
-    const _overrides = compound?.getParamOverrides?.() || {};
     const maxLoss = _overrides.max_daily_loss || MOMENTUM.max_daily_loss;
     if (losses24h.total_loss >= maxLoss) {
       console.log(`[Momentum] 24h loss $${losses24h.total_loss.toFixed(2)} >= max $${maxLoss}, pause`);

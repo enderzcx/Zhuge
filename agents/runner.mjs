@@ -61,7 +61,7 @@ export function createAgentRunner({ config, db, messageBus }) {
           body: JSON.stringify(reqBody),
           signal: AbortSignal.timeout(opts.timeout || 30000),
         });
-        if ((r.status === 402 || r.status === 429) && attempt < 2) {
+        if ((r.status === 402 || r.status === 429 || r.status >= 500) && attempt < 2) {
           await new Promise(ok => setTimeout(ok, 3000 * (attempt + 1)));
           return _doFetch(attempt + 1);
         }
