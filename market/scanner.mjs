@@ -321,11 +321,29 @@ Rules:
     const losses24h = db.prepare(
       "SELECT COALESCE(SUM(ABS(pnl)), 0) as total_loss FROM trades WHERE status = 'closed' AND pnl < 0 AND trade_id LIKE 'res_%' AND closed_at > datetime('now', '-1 day')"
     ).get();
-    // Include unrealized losses from open momentum positions
-    const openMomentumPnl = db.prepare(
-      "SELECT COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as float_loss FROM trades WHERE status = 'open' AND trade_id LIKE 'res_%'"
-    ).get();
-    const totalLoss24h = losses24h.total_loss + (openMomentumPnl?.float_loss || 0);
+    // Include unrealized losses from open momentum positions (compute from entry vs current price)
+    let floatingLoss = 0;
+    try {
+      const openTrades = db.prepare(
+        "SELECT pair, side, entry_price, amount, leverage FROM trades WHERE status = 'open' AND trade_id LIKE 'res_%'"
+      ).all();
+      for (const t of openTrades) {
+        const dir = t.side === 'buy' ? 1 : -1;
+        const entry = parseFloat(t.entry_price || 0);
+        const amt = parseFloat(t.amount || 0);
+        if (!entry || !amt) continue;
+        // Get current price from Bitget
+        try {
+          const ticker = await bitgetRequest('GET', `/api/v2/mix/market/ticker?symbol=${t.pair}&productType=USDT-FUTURES`);
+          const cur = parseFloat((Array.isArray(ticker) ? ticker[0] : ticker)?.lastPr || '0');
+          if (cur > 0) {
+            const pnl = dir * (cur - entry) * amt;
+            if (pnl < 0) floatingLoss += Math.abs(pnl);
+          }
+        } catch {}
+      }
+    } catch (e) { _log.warn('floating_loss_calc_failed', { module: 'momentum', error: e.message }); }
+    const totalLoss24h = losses24h.total_loss + floatingLoss;
     const maxLoss = _overrides.max_daily_loss || MOMENTUM.max_daily_loss;
     if (totalLoss24h >= maxLoss) {
       _log.info('momentum_daily_loss_limit', { module: 'momentum', realized: losses24h.total_loss, floating: openMomentumPnl?.float_loss || 0, total: totalLoss24h, max_loss: maxLoss });

@@ -480,7 +480,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       // Record in trades table (backward compat)
       const tradeId = `bg_${orderId}`;
-      insertTrade.run(tradeId, 'bitget', symbol, side, 0, scoutSize, 0, 10, 'open', orderId || '',
+      const levNum = parseInt(leverage, 10) || 10;
+      insertTrade.run(tradeId, 'bitget', symbol, side, 0, scoutSize, 0, levNum, 'open', orderId || '',
         JSON.stringify(signal), `scout L0 ${action} conf:${signal.confidence}`, new Date().toISOString());
 
       // Create position group
@@ -592,7 +593,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       // Record in trades table
       const tradeId = `bg_${orderId}`;
-      insertTrade.run(tradeId, 'bitget', group.symbol, side, currentPrice, size, 0, 10, 'open', orderId || '',
+      const levNum = parseInt(leverage, 10) || 10;
+      insertTrade.run(tradeId, 'bitget', group.symbol, side, currentPrice, size, 0, levNum, 'open', orderId || '',
         JSON.stringify(signal), `scaleUp L${nextLevel} conf:${signal.confidence}`, new Date().toISOString());
 
       // Update position group
@@ -686,7 +688,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const direction = group.side === 'long' ? 1 : -1;
       const pnl = direction * (currentPrice - group.avg_entry_price) * group.total_size;
       const pnlPct = group.avg_entry_price > 0
-        ? direction * (currentPrice - group.avg_entry_price) / group.avg_entry_price * 10 * 100
+        ? direction * (currentPrice - group.avg_entry_price) / group.avg_entry_price * (SCALING?.leverage || config.MOMENTUM?.leverage || 10) * 100
         : 0;
 
       const sign = pnl >= 0 ? '+' : '';

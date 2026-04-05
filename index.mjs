@@ -164,15 +164,6 @@ registerMarketRoutes(app, { db, priceStream });
 registerBitgetRoutes(app, { bitgetClient });
 registerLiFiRoutes(app, lifi);
 
-// --- Graceful shutdown ---
-process.on('SIGTERM', () => {
-  log.info('shutdown', { module: 'index', signal: 'SIGTERM' });
-  agentBot.stop?.();
-  health.stop?.();
-  try { db.db.close(); } catch {}
-  process.exit(0);
-});
-
 // --- Anomaly handler (price spike -> instant analysis) ---
 priceStream.setAnomalyHandler((anomaly) => {
   pipeline.collectAndAnalyze()
@@ -224,11 +215,9 @@ app.listen(config.PORT, () => {
       health.stop();
       // Sync trades one last time (detect fills before exit)
       await bitgetExec.checkAndSyncTrades().catch(() => {});
-      // Flush logs
-      const { stop: stopLogger } = await import('./agent/observe/logger.mjs').catch(() => ({}));
-      // Close DB (flushes WAL)
-      if (db.db?.close) db.db.close();
       log.info('shutdown_done', { module: 'index', signal });
+      // Close DB (flushes WAL) — must be after final log write
+      if (db.db?.close) db.db.close();
     } catch (e) {
       log.error('shutdown_error', { module: 'index', error: e.message });
     }

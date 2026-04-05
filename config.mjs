@@ -96,6 +96,7 @@ export function createConfig() {
       ['strong_buy', 'strong_sell'],                                          // L3: strong only
     ],
     stop_loss_pcts: [3.0, 2.5, 2.0, 1.5],           // SL % from avg entry per level (tightens)
+    leverage: 10,                                    // default leverage for scaling positions
     max_exposure_eth: 1.0,                           // hard cap total position
     max_exposure_pct: 0.30,                          // max % of account equity
     abandon_cooldown_ms: 30 * 60 * 1000,             // 30 min cooldown after abandon

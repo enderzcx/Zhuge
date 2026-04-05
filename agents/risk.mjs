@@ -144,14 +144,14 @@ Your workflow:
       const positions = Array.isArray(posData) ? posData : (posData?.list || []);
       const unrealizedLoss = positions.reduce((s, p) => s + Math.min(0, parseFloat(p.unrealizedPL || '0')), 0);
       loss24h += unrealizedLoss;
-    } catch {}
+    } catch (e) { console.warn('[Risk] Failed to fetch unrealized PnL, loss check excludes floating:', e.message); }
     // Dynamic threshold: 5% of account equity (fetch from Bitget)
     let lossThreshold = 50; // fallback
     try {
       const accts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES').catch(() => []);
       const equity = parseFloat((accts || []).find(a => a.marginCoin === 'USDT')?.accountEquity || '0');
       if (equity > 0) lossThreshold = equity * 0.05;
-    } catch {}
+    } catch (e) { console.warn('[Risk] Failed to fetch equity, using fallback threshold $50:', e.message); }
     if (loss24h < -lossThreshold) {
       const reason = `24小时累计亏损 ${loss24h.toFixed(2)} USDC (含浮亏)，超过安全阈值 (${lossThreshold.toFixed(2)})`;
       postMessage('risk', 'executor', 'VETO', { reason }, traceId);
