@@ -27,14 +27,22 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
 
   /**
    * Load owner directives from memory file.
+   * Returns { directives, isEmpty } so buildSystemPrompt can inject bootstrap when needed.
    */
   function _loadDirectives() {
     const p = join(MEMORY_DIR, 'owner_directives.md');
-    if (!existsSync(p)) return '';
+    if (!existsSync(p)) return { directives: '', isEmpty: true };
     try {
       const content = readFileSync(p, 'utf-8').trim();
-      return content ? `\n\n## 老板指令 (最高优先级)\n${content}` : '';
-    } catch { return ''; }
+      if (!content) return { directives: '', isEmpty: true };
+      // Strip headings + template placeholder, check if anything real remains
+      const stripped = content.replace(/^#.*$/gm, '').replace(/^[-*] *待用户设定\s*$/gm, '').trim();
+      const hasEntries = stripped.length > 0;
+      return {
+        directives: hasEntries ? `\n\n## 老板指令 (最高优先级)\n${content}` : '',
+        isEmpty: !hasEntries,
+      };
+    } catch { return { directives: '', isEmpty: true }; }
   }
 
   /**
@@ -118,9 +126,14 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
    */
   async function buildSystemPrompt() {
     const liveCtx = await _loadLiveContext();
+    const { directives, isEmpty } = _loadDirectives();
+    const bootstrap = isEmpty
+      ? '\n\n## ⚡ 首次启动\n老板指令为空。你是新初始化的操盘手，需要基础约束才能安全运行。\n1. 告知老板你需要设定约束\n2. 引导设定：最大杠杆、单笔最大风险、最大日亏损、偏好策略方向\n3. 用 save_memory 将回答存入 owner_directives.md\n4. 查询余额和持仓，建立初始 context.md\n这是你的第一优先级。'
+      : '';
     const parts = [
       _loadStatic(),
-      _loadDirectives(),
+      directives,
+      bootstrap,
       _loadCompoundRules(),
       liveCtx,
       _loadPushContext(),
