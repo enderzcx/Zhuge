@@ -39,6 +39,7 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
     observe: config.TG_TOPIC_OBSERVE || null,
     compound: config.TG_TOPIC_COMPOUND || null,
     chart: config.TG_TOPIC_CHART || null,
+    news: config.TG_TOPIC_NEWS || null,
   };
 
   async function _send(text, topicKey) {
