@@ -70,9 +70,15 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
             stream.setToolStatus(event.name, 'running');
             break;
 
-          case 'tool_result':
+          case 'tool_result': {
             stream.setToolStatus(event.name, 'done');
+            // If tool returned an error, mark it
+            const resultStr = typeof event.result === 'string' ? event.result : JSON.stringify(event.result);
+            if (resultStr.includes('"error"') || resultStr.startsWith('Error:')) {
+              stream.setToolStatus(event.name, 'error');
+            }
             break;
+          }
 
           case 'confirm_needed': {
             // Flush current stream
