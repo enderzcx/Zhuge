@@ -43,11 +43,17 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
     try {
       const numbered = items.map((it, i) => `${i + 1}. ${(it.text || it.headline || '').slice(0, 150)}`).join('\n');
       const result = await llm(
-        [{ role: 'user', content: `你是交易员的信息过滤器。以下${items.length}条${type === 'urgent' ? '快讯' : '新闻'}，只保留对金融市场/交易有影响的（如：战争影响油价、央行政策、大宗商品、地缘风险影响避险情绪、制裁影响供应链等）。
+        [{ role: 'user', content: `你是交易员的信息过滤器。以下${items.length}条${type === 'urgent' ? '快讯' : '新闻'}，只保留对金融市场/交易影响最大的（如：战争影响油价、央行政策、大宗商品供应中断、地缘风险影响避险情绪、制裁影响供应链等）。
 
 ${numbered}
 
-输出格式：只输出保留的编号（逗号分隔），如 "1,3,5"。如果都不相关就输出 "none"。不要解释。` }],
+规则：
+- 最多选 5 条，按重要性排序（最重要的排前面）
+- 同一事件的多条报道只保留最重要的一条
+- 纯政治/社会新闻不选，除非直接影响市场
+- 输出格式：只输出保留的编号（逗号分隔，按重要性排序），如 "3,1,5"
+- 如果都不相关就输出 "none"
+不要解释。` }],
         { max_tokens: 50, timeout: 10000 }
       );
       const answer = (result.content || result || '').trim();
