@@ -5,7 +5,7 @@
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
-export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog }) {
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine }) {
 
   const { runAgent, agentMetrics } = agentRunner;
   const _metrics = metrics || { record() {} }; // fallback if not provided
@@ -148,6 +148,16 @@ Output ONLY the JSON, no other text.`;
 
       // Persist to SQLite
       persistAnalysis(mode, parsed, now);
+
+      // Smart Push: if analyst says push_worthy, send to owner via TG
+      if (parsed.push_worthy && pushEngine) {
+        const newsForPush = Array.isArray(news) ? news.slice(0, 5).map(n => ({
+          title: n.title || n.headline, url: n.url || n.link || '',
+          score: n.score || 0, signal: n.signal || 'neutral',
+        })) : [];
+        pushEngine.pushFlash({ analysis: parsed, news: newsForPush, traceId })
+          .catch(err => log.error('push_flash_error', { module: 'pipeline', error: err.message }));
+      }
 
       // Record analyst final decision
       try {

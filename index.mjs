@@ -88,7 +88,8 @@ const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram 
 const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources });
 const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher });
-const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log });
+// Push engine created after agentBot (needs tgSend)
+let pushEngine = null; // initialized after bot creation
 
 // --- Agent Harness (Phase 2) ---
 const agentLLM = createAgentLLM(config, { log, metrics });
@@ -100,7 +101,9 @@ const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenan
 
 // Register tools
 const systemTools = createSystemTools({ log });
-const dataTools = createDataTools({ dataSources, priceStream, db: db.db, scanner });
+// pushEngine is null here, will be set after bot creation. Use getter pattern.
+const _pushRef = { engine: null };
+const dataTools = createDataTools({ dataSources, priceStream, db: db.db, scanner, pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] } });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log });
 toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS]);
@@ -108,7 +111,7 @@ toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...t
 const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
 toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS });
 
-const promptLoader = createPromptLoader({ db: db.db });
+const promptLoader = createPromptLoader({ db: db.db, pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] } });
 const confirmHandler = createConfirmHandler({ tgCall: null, executor: toolExecutor, history: agentHistory, log }); // tgCall set after bot creation
 const agentBot = createAgentBot({
   config, agentLLM, history: agentHistory, executor: toolExecutor,
@@ -117,6 +120,15 @@ const agentBot = createAgentBot({
 });
 // Wire tgCall into confirmHandler (circular dep resolved via setTgCall)
 confirmHandler.setTgCall(agentBot.tgCall);
+
+// --- Push Engine (Phase 3) ---
+import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
+const tgSend = (text) => agentBot.sendMessage(config.TG_CHAT_ID, text);
+pushEngine = createSmartPush({ db, config, tgSend, log, metrics });
+_pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
+
+// Create pipeline (after push engine)
+const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine });
 
 // --- StockPulse Telegram Bot (deprecated — only starts if agent bot token not set) ---
 const eventBus = { emit() {} };

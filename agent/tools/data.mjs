@@ -3,7 +3,7 @@
  *   crucix_data, fetch_news, market_scan, price, agent_decisions
  */
 
-export function createDataTools({ dataSources, priceStream, db, scanner }) {
+export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { priceCache } = priceStream;
 
@@ -43,6 +43,17 @@ export function createDataTools({ dataSources, priceStream, db, scanner }) {
         type: 'object',
         properties: {
           symbol: { type: 'string', description: '交易对 (如 BTC-USDT, 不填返回全部)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'recent_pushes',
+      description: '最近的推送记录 (含完整分析上下文, 用于追问)',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: '条数 (默认5)' },
         },
       },
       requiresConfirmation: false,
@@ -117,6 +128,23 @@ export function createDataTools({ dataSources, priceStream, db, scanner }) {
         return entry ? JSON.stringify(entry) : `No price data for ${symbol}`;
       }
       return JSON.stringify(priceCache);
+    },
+
+    async recent_pushes({ limit } = {}) {
+      if (!pushEngine) return '[]';
+      const contexts = pushEngine.getRecentContext(limit || 5);
+      return JSON.stringify(contexts.map(c => ({
+        level: c.level,
+        text: c.text,
+        pushedAt: c.pushedAt,
+        analysis: c.context?.analysis ? {
+          action: c.context.analysis.recommended_action,
+          confidence: c.context.analysis.confidence,
+          briefing: c.context.analysis.briefing,
+          alerts: c.context.analysis.alerts,
+        } : null,
+        news: (c.context?.news || []).slice(0, 3),
+      })));
     },
 
     async agent_decisions({ limit, agent } = {}) {

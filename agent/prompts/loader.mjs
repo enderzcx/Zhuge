@@ -11,7 +11,7 @@ import { join } from 'path';
 const PROMPTS_DIR = 'agent/prompts';
 const MEMORY_DIR = 'agent/memory';
 
-export function createPromptLoader({ db }) {
+export function createPromptLoader({ db, pushEngine }) {
   // Cache static prompts (read once)
   let _staticCache = null;
 
@@ -59,6 +59,21 @@ export function createPromptLoader({ db }) {
   }
 
   /**
+   * Load recent push context (so agent can answer follow-ups).
+   */
+  function _loadPushContext() {
+    if (!pushEngine) return '';
+    try {
+      const recent = pushEngine.getRecentContext(3);
+      if (recent.length === 0) return '';
+      const lines = recent.map(p =>
+        `[${p.pushedAt?.split('T')[1]?.slice(0, 5) || '?'}] ${p.level}: ${p.text.slice(0, 100)}`
+      );
+      return `\n\n## 最近推送 (用户可能追问)\n${lines.join('\n')}`;
+    } catch { return ''; }
+  }
+
+  /**
    * Load current context (what agent is doing / recent state).
    */
   function _loadContext() {
@@ -78,6 +93,7 @@ export function createPromptLoader({ db }) {
       _loadStatic(),
       _loadDirectives(),
       _loadCompoundRules(),
+      _loadPushContext(),
       _loadContext(),
     ];
     return parts.filter(Boolean).join('');
