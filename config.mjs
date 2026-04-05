@@ -1,12 +1,6 @@
-import { readFileSync } from 'fs';
+import 'dotenv/config';
 
 export function createConfig() {
-  // --- Env ---
-  const envLines = readFileSync('.env', 'utf-8').split('\n');
-  for (const line of envLines) {
-    const [k, ...v] = line.split('=');
-    if (k && v.length) process.env[k.trim()] = v.join('=').trim();
-  }
 
   const PORT = process.env.PORT || 3200;
   const CRUCIX = process.env.CRUCIX_URL || 'http://localhost:3117';

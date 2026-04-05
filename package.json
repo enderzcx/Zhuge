@@ -12,6 +12,7 @@
   "dependencies": {
     "@lifi/sdk": "^3.16.3",
     "better-sqlite3": "^12.8.0",
+    "dotenv": "^17.4.0",
     "express": "^5.1.0",
     "viem": "^2.47.6",
     "ws": "^8.20.0"
