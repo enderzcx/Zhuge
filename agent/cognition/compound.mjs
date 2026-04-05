@@ -26,6 +26,7 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       trade_count INTEGER,
       confidence REAL DEFAULT 0,
       status TEXT DEFAULT 'active',
+      param_changes_json TEXT DEFAULT '{}',
       source_compound_id INTEGER,
       discovered_at TEXT DEFAULT (datetime('now')),
       superseded_at TEXT,
@@ -95,15 +96,21 @@ ${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRu
 {
   "rule_id": "unique_snake_case_id",
   "description": "人类可读的规则描述 (中文)",
-  "action": "avoid | prefer | adjust_size",
+  "action": "avoid | prefer | adjust_size | adjust_param",
   "evidence": "支撑这条规则的 trade_ids (逗号分隔)",
   "trade_count": 5,
   "confidence": 0.7,
-  "status": "active | superseded"
+  "status": "active | superseded",
+  "param_changes": { }
 }
 
+param_changes 是可选的，用于直接修改执行参数（只有你非常有把握时才用）:
+  可调参数: leverage (杠杆), tp_pct (止盈%), sl_pct (止损%), margin_per_trade (保证金USDT),
+            min_score (最低评分), max_daily_loss (日亏损上限USDT), max_open (最大同时持仓数)
+  示例: { "leverage": 5, "sl_pct": 0.03 } 表示杠杆降到5x、止损改为3%
+
 规则要具体可执行，不要泛泛而谈。基于数据，不要编造。
-最多 5 条规则。如果已有规则仍然有效，保持其 rule_id 不变并更新 evidence。
+最多 8 条规则。如果已有规则仍然有效，保持其 rule_id 不变并更新 evidence。
 要废弃的旧规则设 status: "superseded"。
 仅输出 JSON 数组，不要其他文字。`;
 
@@ -136,8 +143,8 @@ ${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRu
     // Apply rules to DB
     let generated = 0, updated = 0, deprecated = 0;
     const upsertStmt = db.prepare(`
-      INSERT INTO compound_rules (rule_id, description, action, evidence_trade_ids, trade_count, confidence, status, source_compound_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO compound_rules (rule_id, description, action, evidence_trade_ids, trade_count, confidence, status, param_changes_json, source_compound_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(rule_id) DO UPDATE SET
         description = excluded.description,
         action = excluded.action,
@@ -145,6 +152,7 @@ ${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRu
         trade_count = excluded.trade_count,
         confidence = excluded.confidence,
         status = excluded.status,
+        param_changes_json = excluded.param_changes_json,
         source_compound_id = excluded.source_compound_id
     `);
 
@@ -166,6 +174,7 @@ ${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRu
           rule.trade_count || 0,
           rule.confidence || 0.5,
           rule.status || 'active',
+          JSON.stringify(rule.param_changes || {}),
           compoundId,
         );
         if (rule.status === 'superseded') deprecated++;
@@ -200,5 +209,26 @@ ${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRu
     } catch { return []; }
   }
 
-  return { shouldRun, run, getActiveRules };
+  /**
+   * Get merged param overrides from all active rules.
+   * Higher confidence rules take priority.
+   * @returns {{ leverage?: number, tp_pct?: number, sl_pct?: number, ... }}
+   */
+  function getParamOverrides() {
+    try {
+      const rules = db.prepare(
+        "SELECT param_changes_json, confidence FROM compound_rules WHERE status = 'active' AND param_changes_json != '{}' ORDER BY confidence ASC"
+      ).all();
+      const merged = {};
+      for (const r of rules) {
+        try {
+          const changes = JSON.parse(r.param_changes_json || '{}');
+          Object.assign(merged, changes); // later (higher confidence) overwrites earlier
+        } catch {}
+      }
+      return merged;
+    } catch { return {}; }
+  }
+
+  return { shouldRun, run, getActiveRules, getParamOverrides };
 }

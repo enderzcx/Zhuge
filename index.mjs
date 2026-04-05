@@ -91,7 +91,7 @@ const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram 
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
 const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources });
-const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher });
+const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: agentCompound });
 // Push engine created after agentBot (needs tgSend)
 let pushEngine = null; // initialized after bot creation
 

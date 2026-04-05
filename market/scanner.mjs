@@ -4,7 +4,7 @@
 
 import { calcRSI, calcBollinger } from './indicators.mjs';
 
-export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher }) {
+export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher, compound }) {
   const { bitgetPublic, bitgetRequest, roundPrice } = bitgetClient;
   const { runAgent } = agentRunner;
   const { insertDecision, insertTrade, insertCandidate, updateCandidateResearch, markCandidateTraded } = db;
@@ -307,8 +307,9 @@ Rules:
     const openMomentum = db.prepare(
       "SELECT COUNT(*) as cnt FROM trades WHERE status = 'open' AND trade_id LIKE 'res_%'"
     ).get();
-    if (openMomentum.cnt >= MOMENTUM.max_open) {
-      console.log(`[Momentum] Already ${openMomentum.cnt} open momentum trades (max ${MOMENTUM.max_open}), skip`);
+    const maxOpen = _overrides.max_open || MOMENTUM.max_open;
+    if (openMomentum.cnt >= maxOpen) {
+      console.log(`[Momentum] Already ${openMomentum.cnt} open momentum trades (max ${maxOpen}), skip`);
       return;
     }
 
@@ -316,13 +317,15 @@ Rules:
     const losses24h = db.prepare(
       "SELECT COALESCE(SUM(ABS(pnl)), 0) as total_loss FROM trades WHERE status = 'closed' AND pnl < 0 AND trade_id LIKE 'res_%' AND closed_at > datetime('now', '-1 day')"
     ).get();
-    if (losses24h.total_loss >= MOMENTUM.max_daily_loss) {
-      console.log(`[Momentum] 24h loss $${losses24h.total_loss.toFixed(2)} >= max $${MOMENTUM.max_daily_loss}, pause`);
+    const _overrides = compound?.getParamOverrides?.() || {};
+    const maxLoss = _overrides.max_daily_loss || MOMENTUM.max_daily_loss;
+    if (losses24h.total_loss >= maxLoss) {
+      console.log(`[Momentum] 24h loss $${losses24h.total_loss.toFixed(2)} >= max $${maxLoss}, pause`);
       return;
     }
 
     // 4. Research top candidates (limit to 3 to save tokens)
-    let slotsAvailable = MOMENTUM.max_open - openMomentum.cnt;
+    let slotsAvailable = maxOpen - openMomentum.cnt;
     const toResearch = candidates.slice(0, Math.min(3, candidates.length));
 
     for (const candidate of toResearch) {
@@ -341,7 +344,8 @@ Rules:
         }
 
         // 5. Execute if TRADE verdict + score threshold
-        if (report.verdict === 'TRADE' && report.total_score >= MOMENTUM.min_score && report.direction) {
+        const minScore = _overrides.min_score || MOMENTUM.min_score;
+        if (report.verdict === 'TRADE' && report.total_score >= minScore && report.direction) {
           const traded = await executeMomentumTrade(candidate.symbol, report);
           if (traded) {
             slotsAvailable--;
@@ -367,14 +371,18 @@ Rules:
       const isBuy = report.direction === 'long';
       const side = isBuy ? 'buy' : 'sell';
       const holdSide = isBuy ? 'long' : 'short';
-      const leverage = String(MOMENTUM.leverage);
+
+      // Apply compound param overrides (AI-decided parameters)
+      const overrides = compound?.getParamOverrides?.() || {};
+      const leverage = String(overrides.leverage || MOMENTUM.leverage);
 
       // Check balance
       const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
       const usdtBal = accounts?.find(a => a.marginCoin === 'USDT');
       const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
-      if (available < MOMENTUM.margin_per_trade) {
-        console.log(`[Momentum] Insufficient margin: $${available.toFixed(2)} < $${MOMENTUM.margin_per_trade}`);
+      const marginPerTrade = overrides.margin_per_trade || MOMENTUM.margin_per_trade;
+      if (available < marginPerTrade) {
+        console.log(`[Momentum] Insufficient margin: $${available.toFixed(2)} < $${marginPerTrade}`);
         return false;
       }
 
@@ -401,7 +409,8 @@ Rules:
       }
 
       // Calculate size: margin * leverage / price
-      const notional = MOMENTUM.margin_per_trade * MOMENTUM.leverage;
+      const effectiveLeverage = overrides.leverage || MOMENTUM.leverage;
+      const notional = marginPerTrade * effectiveLeverage;
       const size = String(Math.max(parseFloat((notional / currentPrice).toFixed(4)), 0.01));
 
       // Set leverage
@@ -415,9 +424,9 @@ Rules:
         side, tradeSide: 'open', orderType: 'market', size,
       };
 
-      // TP/SL based on actual current price (not LLM's stale price)
-      // Long: TP = +3%, SL = -1.5% | Short: TP = -3%, SL = +1.5%
-      const tpPct = 0.03, slPct = 0.015;
+      // TP/SL — compound overrides or defaults
+      const tpPct = overrides.tp_pct || 0.03;
+      const slPct = overrides.sl_pct || 0.015;
       const tpRaw = isBuy ? currentPrice * (1 + tpPct) : currentPrice * (1 - tpPct);
       const slRaw = isBuy ? currentPrice * (1 - slPct) : currentPrice * (1 + slPct);
       const tp = await roundPrice(symbol, tpRaw);
