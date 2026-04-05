@@ -91,7 +91,8 @@ const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram 
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
 const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources });
-const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: agentCompound });
+const _compoundRef = { instance: null };
+const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {} } });
 // Push engine created after agentBot (needs tgSend)
 let pushEngine = null; // initialized after bot creation
 
@@ -102,6 +103,7 @@ const modelSelector = createModelSelector(config);
 const toolRegistry = createToolRegistry();
 const agentProvenance = createProvenance({ db: db.db, log });
 const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenance, log, metrics });
+_compoundRef.instance = agentCompound; // wire into scanner via getter
 
 // Register tools
 const systemTools = createSystemTools({ log });
