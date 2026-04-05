@@ -48,13 +48,16 @@ tradeagent/
 │   │   ├── tools.md          ← 工具描述 + 使用规则
 │   │   ├── safety.md         ← 危险操作规则 + 确认条件
 │   │   └── loader.mjs        ← 动态拼装 system prompt                ~100
+│   ├── cognition/                ← AI Native 知识复利系统 (独有)
+│   │   ├── provenance.mjs        ← 决策全量存储 (开仓快照+关闭回填)    ~150
+│   │   └── compound.mjs          ← LLM 自主复盘 (自己发现pattern写规则) ~150
 │   └── memory/
-│       ├── MEMORY.md          ← 记忆索引
-│       ├── context.md         ← 当前状态
-│       ├── trading_lessons.md ← 交易教训 (reviewer 写入)
-│       ├── user_preferences.md← 用户偏好 (对话学习)
-│       ├── market_context.md  ← 市场判断 (分析后更新)
-│       └── push_log.md        ← 最近推送 (完整分析链路)
+│       ├── MEMORY.md              ← 记忆索引
+│       ├── context.md             ← 当前状态
+│       ├── trading_lessons.md     ← 交易教训 (reviewer 写入)
+│       ├── owner_directives.md    ← 老板指令 (用户策略约束)
+│       ├── market_context.md      ← 市场判断 (分析后更新)
+│       └── push_log.md            ← 最近推送 (完整分析链路)
 │
 ├── dashboard/                 ← Next.js 轻量看板 (~800 lines)
 │   ├── app/
@@ -107,6 +110,205 @@ tradeagent/
 ### 5. 300 Lines/File Ceiling
 - 最大单文件 250 行，超出必须拆分
 - 每个文件单一职责
+
+### 6. AI Native Self-Improvement (独有设计)
+- Agent 从自己的交易经验中自主发展"盘感"，不是人写规则
+- 人只做两件事: 存好数据 (provenance) + 让 LLM 自己复盘 (compound)
+- 不预设 pattern 维度，LLM 自己发现什么维度重要
+
+---
+
+## Compound Knowledge System (知识复利)
+
+> 灵感: Compound Engineering — 每次工作的产出不只是代码，还有知识。
+> 我们的版本: 每笔交易的产出不只是 PnL，还有 LLM 自主发现的认知。
+>
+> 关键区别: CE 是文档级复利 (markdown)，我们是 LLM 自主复盘式复利。
+> CE 人工触发 /ce:compound，我们自动触发 (每 N 笔交易)。
+
+### 角色定义
+
+- **Agent = 操盘手**：自主执行分析、开平仓、风控、自我复盘
+- **用户 = 基金经理/老板**：设定策略约束、监督、偶尔干预
+- 知识的发现者是 LLM 自己，不是人类工程师
+
+### 为什么这样设计 (数据驱动的决策)
+
+2026-04-05 对实际交易数据的分析发现：
+- 17 笔真实交易，全部来自 momentum researcher，不是 analyst
+- analyst 做了 312 次分析，0 次 strong_buy，从不触发交易
+- signal_snapshot 全是空的 — agent 对自己的决策上下文完全失忆
+- 样本太小，无法用 SQL 做有统计意义的 pattern 检测
+
+结论：不预设 pattern 维度 (时间/funding/regime)，先存好数据，让 LLM 自己发现 pattern。
+
+### Module 1: provenance.mjs — 决策全量存储 (纯工程，无 AI)
+
+交易时把所有上下文存下来。这是基础设施，没有这个什么都做不了。
+
+```sql
+CREATE TABLE IF NOT EXISTS decision_provenance (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trade_id TEXT NOT NULL,
+  trace_id TEXT,
+
+  -- 开仓时存 (完整快照)
+  symbol TEXT,
+  side TEXT,
+  leverage INTEGER,
+  entry_price REAL,
+  momentum_score INTEGER,          -- researcher 评分
+  funding_rate REAL,
+  volume_24h REAL,
+  volume_ratio REAL,               -- 当前小时量 / 6h均量
+  price_action_json TEXT,          -- K线结构 { higher_highs, trend, max_candle_pct }
+  hour_utc INTEGER,
+  researcher_reasoning TEXT,       -- 完整开仓理由
+  risk_verdict TEXT,               -- PASS/VETO + reason
+  active_rules_json TEXT,          -- 开仓时生效的 compound rules
+
+  -- 关闭时回填
+  exit_price REAL,
+  pnl REAL,
+  pnl_pct REAL,
+  hold_duration_min INTEGER,
+  max_drawdown_pct REAL,
+
+  created_at TEXT DEFAULT (datetime('now')),
+  closed_at TEXT
+);
+```
+
+**关键: 字段来自实际数据，不是凭空设计。** momentum_score, funding_rate, volume_ratio,
+hour_utc — 这些都是 researcher reasoning 里反复出现的决策因子。
+
+### Module 2: compound.mjs — LLM 自主复盘 (纯 AI，无人写规则)
+
+每 N 笔交易后（或每天），LLM 读取所有带 provenance 的交易，自己发现 pattern，自己写规则。
+
+**触发时机:**
+```
+每 10 笔交易关闭 → 触发 compound
+或每天 end-of-day → 触发 compound (如果有新关闭的交易)
+```
+
+**Compound LLM Prompt:**
+```
+你是一个交易复盘专家。以下是你最近 N 笔交易的完整数据:
+
+[每笔交易的 provenance 数据: symbol, side, momentum_score, funding_rate,
+ volume_ratio, hour_utc, reasoning, pnl_pct, hold_duration, ...]
+
+请分析:
+1. 你发现了什么 pattern? (赢的交易有什么共同点? 亏的呢?)
+2. 有没有你应该避免的条件组合?
+3. 有没有你表现特别好的条件?
+4. 之前的规则 (如果有) 是否需要更新或废弃?
+
+输出 JSON 数组, 每条规则:
+{
+  "rule_id": "unique_id",
+  "description": "人类可读的规则描述",
+  "action": "avoid | prefer | adjust_size | adjust_sl",
+  "evidence": "哪些交易支撑这条规则 (trade_ids)",
+  "trade_count": 5,
+  "confidence": 0.7,
+  "status": "active | superseded"
+}
+```
+
+**输出存入 compound_rules 表:**
+```sql
+CREATE TABLE IF NOT EXISTS compound_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id TEXT UNIQUE,
+  description TEXT NOT NULL,       -- LLM 写的规则描述
+  action TEXT,                     -- avoid | prefer | adjust_size
+  evidence_trade_ids TEXT,         -- 支撑这条规则的交易 IDs
+  trade_count INTEGER,             -- 基于多少笔交易
+  confidence REAL DEFAULT 0,       -- LLM 自评的置信度
+  status TEXT DEFAULT 'active',    -- active | superseded | deprecated
+  source_compound_id INTEGER,      -- 哪次 compound 产出的
+  discovered_at TEXT DEFAULT (datetime('now')),
+  superseded_at TEXT,
+  superseded_by TEXT               -- 被哪条新规则替代
+);
+
+CREATE TABLE IF NOT EXISTS compound_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trades_reviewed INTEGER,
+  rules_generated INTEGER,
+  rules_updated INTEGER,
+  rules_deprecated INTEGER,
+  llm_reasoning TEXT,              -- LLM 完整复盘输出 (审计用)
+  run_at TEXT DEFAULT (datetime('now'))
+);
+```
+
+**规则注入 system prompt:**
+```
+## 你的交易认知 (由 AI 自主复盘产出, 非人工编写)
+⚠ 避免: momentum_score < 64 的交易历史胜率仅 30% (基于 6 笔)
+⚠ 避免: volume_ratio < 1.0 时开仓, 4 笔全亏
+✓ 偏好: funding_rate 为负时做多, 胜率 71% (基于 7 笔)
+📝 观察: UTC 18:00-21:00 时段表现最好 (样本少, 待验证)
+```
+
+**生命周期 (LLM 自己管理):**
+```
+compound run #1 (10笔数据) → 发现 3 条初步规则 (confidence 低)
+compound run #2 (20笔数据) → 验证 2 条, 废弃 1 条, 新发现 1 条
+compound run #3 (30笔数据) → 规则合并, confidence 提升
+...
+LLM 每次复盘时看到之前的规则, 自己决定: 保留 / 更新 / 废弃
+```
+
+**与 CE 的对比:**
+```
+CE:  人工判断是否值得 compound → 人工跑 /ce:compound → 存 markdown → agent 搜文档
+我们: 自动触发 → LLM 自主复盘 → 存结构化规则 → 直接注入 prompt (无需再理解)
+```
+
+### 回溯查询 (TG 对话)
+
+```
+用户: "上笔为什么亏了"
+Agent 查 decision_provenance:
+  RLSUSDT buy 10x | score:70 funding:+0.005% vol_ratio:2.14x
+  开仓理由: 大阳线+51%, 量能放大, 趋势上行
+  结果: pnl -16.4%, 持仓 60min
+
+  compound 规则匹配:
+  → ⚠ "volume_ratio > 2x 但 score < 65 的交易历史胜率低"
+  → 这笔 score=70 但实际是 researcher 给的高分, 价格已经涨完了
+
+  建议: 下次大阳线后追涨要更谨慎, 已记录待下次 compound 更新
+```
+
+---
+
+### Owner Directives (老板指令系统)
+
+用户不是交易员，是监督者。用户的输入变成长期策略约束：
+
+```
+# owner_directives.md (agent 严格遵守)
+
+## 硬约束 (永不违反)
+- 杠杆不超过 10x [来源: 用户 2026-03-15]
+- 不做山寨币 top50 以外的币种 [来源: 用户 2026-04-01]
+- 单笔最大亏损不超过总余额 3% [来源: 用户 2026-03-20]
+
+## 软约束 (可被 agent 建议修改)
+- 每天最多开 3 笔新仓 [来源: 用户 2026-04-02]
+- 优先做空而不是做多 [来源: 用户 2026-04-05, 可能过时]
+
+## 策略方向
+- 当前偏好: 保守, 等待明确信号
+- 关注: BTC ETH SOL
+```
+
+**与 compound rules 的交互：** 如果 LLM compound 发现某个 owner directive 导致错过好机会，agent 会在推送中建议修改，但不会自动违反。Owner directives 永远优先于 compound rules。
 
 ---
 
@@ -316,19 +518,20 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 ## Existing Code Changes
 
 ### integrations/data-sources.mjs
-- [ ] `fetchNews()`: 保留 `url` 字段 in returned objects
-- [ ] `persistNews()`: 存 url 到 DB
+- [x] `fetchNews()`: 保留 `url` 字段 in returned objects
+- [x] `persistNews()`: 存 url 到 DB
 
 ### pipeline.mjs
-- [ ] 接入 observe/logger (替代 console.log)
-- [ ] 接入 observe/metrics (agent 调用计时)
-- [ ] 接入 push/engine (分析后推送决策)
-- [ ] 推送时带完整 analysis + news URLs
+- [x] 接入 observe/logger (替代 console.log)
+- [x] 接入 observe/metrics (agent 调用计时)
+- [ ] 接入 push/engine (分析后推送决策) — Phase 3
+- [ ] 推送时带完整 analysis + news URLs — Phase 3
 
 ### db.mjs
-- [ ] 新增 `metrics` 表
-- [ ] 新增 `push_history` 表
-- [ ] `news` 表加 `url` 字段
+- [x] 新增 `metrics` 表 (在 metrics.mjs 中自建)
+- [x] 新增 `push_history` 表
+- [ ] 新增 `decision_provenance` 表 — Phase 2e
+- [ ] 新增 `compound_rules` / `compound_runs` 表 — Phase 2e
 
 ### stockpulse/
 - [ ] 废弃，TG bot 功能迁移到 agent/telegram/
@@ -347,23 +550,57 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 - [x] db.mjs 新增 metrics / push_history 表
 - [ ] 部署验证: `deploy.sh`, 确认 metrics 写入正常
 
-### Phase 2: TG Agent — 核心智能体
+### Phase 2: TG Agent — 核心智能体 + Compound Knowledge
+
+**2a: Agent Core (基础框架)**
+- [ ] agent/llm.mjs — LLM 调用封装 (流式 + fallback)
 - [ ] agent/loop.mjs — async generator agent loop
-- [ ] agent/llm.mjs — LLM 调用封装 (流式)
 - [ ] agent/history.mjs — 对话历史 + 3层压缩
 - [ ] agent/model-select.mjs — 模型选择 + latch
+
+**2b: Tool System (工具系统)**
 - [ ] agent/tools/registry.mjs — 工具注册 + schema + defaults
-- [ ] agent/tools/executor.mjs — 执行引擎
+- [ ] agent/tools/executor.mjs — 执行引擎 + 确认机制
 - [ ] agent/tools/system.mjs — VPS 控制工具
 - [ ] agent/tools/data.mjs — 数据查询工具
 - [ ] agent/tools/trade.mjs — 交易操作工具
 - [ ] agent/tools/memory.mjs — 记忆读写
-- [ ] agent/prompts/ — base.md + tools.md + safety.md + loader.mjs
-- [ ] agent/memory/ — MEMORY.md + context.md + ...
+
+**2c: Telegram Interface (TG 接入)**
 - [ ] agent/telegram/bot.mjs — TG polling + routing
 - [ ] agent/telegram/stream.mjs — 流式 editMessage
-- [ ] agent/telegram/confirm.mjs — 危险操作确认
-- [ ] 部署验证: TG 发消息，能查持仓、跑命令、记住偏好
+- [ ] agent/telegram/confirm.mjs — 危险操作 inline keyboard 确认
+
+**2d: Prompts & Memory (提示词 + 记忆)**
+- [ ] agent/prompts/base.md — 角色: 自主操盘手, 用户是老板/监督者
+- [ ] agent/prompts/tools.md — 工具描述 + 使用规则
+- [ ] agent/prompts/safety.md — 危险操作规则 + 确认条件
+- [ ] agent/prompts/loader.mjs — 动态拼装 (static + compound_rules + directives)
+- [ ] agent/memory/ — context.md + owner_directives.md + push_log.md
+
+**2e: Compound Knowledge — AI Native 知识复利系统 (独有)**
+- [ ] db.mjs 新增 decision_provenance / compound_rules / compound_runs 表
+- [ ] agent/cognition/provenance.mjs — 决策全量存储 (纯工程)
+  - 开仓时: 存 momentum_score, funding_rate, volume_ratio, hour_utc, reasoning 等完整快照
+  - 关闭时: 回填 pnl, pnl_pct, hold_duration, max_drawdown
+  - 字段来自实际交易数据分析，不是凭空设计
+- [ ] agent/cognition/compound.mjs — LLM 自主复盘 (纯 AI)
+  - 触发: 每 10 笔交易关闭，或每天 end-of-day
+  - LLM 读取所有带 provenance 的交易，自己发现 pattern，自己写规则
+  - 规则存入 compound_rules 表，下次交易前注入 system prompt
+  - LLM 每次复盘时看到之前的规则，自己决定: 保留 / 更新 / 废弃
+- [ ] momentum researcher prompt 改造
+  - 开仓时必须存完整 snapshot 到 provenance (当前 signal_snapshot 是空的)
+  - 强制输出 anti_thesis + kill_condition (零额外 LLM call，改 prompt 即可)
+- [ ] provenance 闭环: 交易关闭 → 回填结果 → 累积到下一次 compound 的输入
+
+**2f: 验收**
+- [ ] TG 发 "我的仓位" → 返回持仓
+- [ ] TG 发 "df -h" → 确认后执行
+- [ ] TG 发 "杠杆不要超过5x" → 写入 owner_directives.md
+- [ ] decision_provenance 有完整开仓快照 (不再是空的 signal_snapshot)
+- [ ] 手动触发一次 compound → compound_rules 表有 LLM 自主发现的规则
+- [ ] "上笔为什么亏了" → provenance 回溯完整决策链
 
 ### Phase 3: Smart Push — 智能推送引擎
 - [ ] agent/push/engine.mjs — AI 推送决策
@@ -399,9 +636,10 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 |-----------|--------|------|
 | TradeAgent (现有) | 122MB | 211MB |
 | Agent Harness (新增) | +20-30MB | +5MB (memory md files) |
+| Cognition/Compound (新增) | +5MB | +5MB/month (provenance + compound_rules) |
 | Observe (新增) | +5MB | +50MB/week (logs + metrics) |
 | Dashboard (新增) | +60-80MB | +50MB (node_modules) |
-| **Total** | ~250MB | ~320MB |
+| **Total** | ~260MB | ~330MB |
 | **VPS Available** | 2300MB | 38GB |
 | **Utilization** | 11% | <1% |
 
@@ -412,7 +650,7 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 每个 Phase 完成时的验收：
 
 **Phase 1:** `SELECT COUNT(*) FROM metrics` 有数据; logs/ 有 JSON lines 文件; news 有 URL
-**Phase 2:** TG 发 "我的仓位" → 返回持仓; "df -h" → 确认后执行; "记住我喜欢保守策略" → 写入 memory
+**Phase 2:** TG 发 "我的仓位" → 返回持仓; "df -h" → 确认后执行; "杠杆不超过5x" → 写入 owner_directives; decision_provenance 有完整开仓快照 (不再是空的); 手动跑一次 compound → compound_rules 有 LLM 自主发现的规则; "上笔为什么亏了" → provenance 回溯完整决策链
 **Phase 3:** FLASH 新闻自动推送到 TG 带 URL; 回复 "详细说说" → 带上下文回答
 **Phase 4:** 浏览器看到实时 PnL 曲线 + 决策时间线 + 指标图表
 **Phase 5:** 检测到 Base 新池 → TG 推送 → 可以下令买入
