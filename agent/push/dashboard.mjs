@@ -21,7 +21,8 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
   const timers = [];
   let pinnedPositionMsgId = null;
 
-  // --- Translation helper ---
+  // --- LLM helpers ---
+
   async function _translate(text) {
     if (!llm || !text) return text;
     try {
@@ -30,7 +31,30 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
         { max_tokens: 300, timeout: 15000 }
       );
       return (result.content || result || text).trim();
-    } catch { return text; } // fallback to original if LLM fails
+    } catch { return text; }
+  }
+
+  /**
+   * LLM filter: only keep items that matter for trading/markets.
+   * Input: array of { text } items. Returns filtered + translated array.
+   */
+  async function _filterForTrading(items, type = 'urgent') {
+    if (!llm || items.length === 0) return items;
+    try {
+      const numbered = items.map((it, i) => `${i + 1}. ${(it.text || it.headline || '').slice(0, 150)}`).join('\n');
+      const result = await llm(
+        [{ role: 'user', content: `你是交易员的信息过滤器。以下${items.length}条${type === 'urgent' ? '快讯' : '新闻'}，只保留对金融市场/交易有影响的（如：战争影响油价、央行政策、大宗商品、地缘风险影响避险情绪、制裁影响供应链等）。
+
+${numbered}
+
+输出格式：只输出保留的编号（逗号分隔），如 "1,3,5"。如果都不相关就输出 "none"。不要解释。` }],
+        { max_tokens: 50, timeout: 10000 }
+      );
+      const answer = (result.content || result || '').trim();
+      if (answer === 'none') return [];
+      const keepIds = answer.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      return items.filter((_, i) => keepIds.includes(i + 1));
+    } catch { return items; } // on error, pass through all
   }
 
   // --- Topic thread IDs (set if using supergroup with topics) ---
@@ -271,22 +295,32 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
       const urgent = crucix?.tg?.urgent || [];
       if (urgent.length === 0) return;
 
+      // Dedup
+      const newItems = [];
       for (const item of urgent) {
         const hash = (item.channel || '') + ':' + (item.text || '').slice(0, 50);
         if (seenUrgentHashes.has(hash)) continue;
         seenUrgentHashes.add(hash);
-
-        // Keep set bounded
-        if (seenUrgentHashes.size > 200) {
-          const arr = [...seenUrgentHashes];
-          arr.slice(0, 100).forEach(h => seenUrgentHashes.delete(h));
-        }
-
-        const raw = (item.text || '').slice(0, 500);
-        const translated = await _translate(raw);
-        const text = `⚡ 快讯 [${item.channel || '?'}]\n\n${translated}`;
-        await _send(text, 'news');
+        newItems.push(item);
       }
+      if (seenUrgentHashes.size > 200) {
+        const arr = [...seenUrgentHashes];
+        arr.slice(0, 100).forEach(h => seenUrgentHashes.delete(h));
+      }
+      if (newItems.length === 0) return;
+
+      // LLM filter: only keep market-relevant items
+      const filtered = await _filterForTrading(newItems, 'urgent');
+      if (filtered.length === 0) return;
+
+      // Batch: translate and send as one message (max 5)
+      const translatedItems = [];
+      for (const item of filtered.slice(0, 5)) {
+        const translated = await _translate((item.text || '').slice(0, 300));
+        translatedItems.push(`⚡ [${item.channel || '?'}]\n${translated}`);
+      }
+
+      await _send(translatedItems.join('\n\n'), 'news');
     } catch (err) {
       _log.error('tg_urgent_check_failed', { module: 'dashboard', error: err.message });
     }
@@ -303,11 +337,15 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
       const feed = crucix?.newsFeed || [];
       if (feed.length === 0) return;
 
-      // Filter: recent, with url, relevant
-      const relevant = feed
-        .filter(n => n.url && (n.headline || n.title))
-        .slice(0, 8);
+      // Filter: has url + headline
+      const withUrl = feed.filter(n => n.url && (n.headline || n.title)).slice(0, 15);
+      if (withUrl.length === 0) return;
 
+      // LLM filter: only keep market-relevant news
+      const relevant = await _filterForTrading(
+        withUrl.map(n => ({ ...n, text: n.headline || n.title })),
+        'news'
+      );
       if (relevant.length === 0) return;
 
       // Batch translate headlines
