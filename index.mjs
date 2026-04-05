@@ -76,7 +76,7 @@ health.start();
 const llm = createLLM(config);
 const bitgetClient = createBitgetClient(config, { metrics, log });
 const messageBus = createMessageBus({ db });
-const agentRunner = createAgentRunner({ config, db, messageBus, metrics });
+const agentRunner = createAgentRunner({ config, db, messageBus, metrics, log });
 const dataSources = createDataSources(config);
 const priceStream = createPriceStream({ db, config, log, metrics });
 const signals = createSignalScoring({ db });
@@ -146,12 +146,15 @@ _alertRef.fn = (msg) => pushEngine.pushError('health', msg); // wire health aler
 // Create pipeline (after push engine)
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine });
 
-// --- StockPulse Telegram Bot (deprecated — only starts if agent bot token not set) ---
-const eventBus = { emit() {} };
-const llmQueue = createLLMQueue({ llm, eventBus });
-const spPushEngine = createSPPushEngine({ db, config });
-const aiAnalyst = createAIAnalyst({ llmQueue, db, config });
-const spBot = createStockPulseBot({ config, pushEngine: spPushEngine, aiAnalyst, dataSources });
+// --- StockPulse Telegram Bot (deprecated — only inits if agent bot token not set) ---
+let spBot = null;
+if (!config.TG_BOT_TOKEN) {
+  const eventBus = { emit() {} };
+  const llmQueue = createLLMQueue({ llm, eventBus });
+  const spPushEngine = createSPPushEngine({ db, config });
+  const aiAnalyst = createAIAnalyst({ llmQueue, db, config });
+  spBot = createStockPulseBot({ config, pushEngine: spPushEngine, aiAnalyst, dataSources });
+}
 
 // --- Register routes ---
 registerAnalysisRoutes(app, { cache, agentMetrics: agentRunner.agentMetrics, priceStream, config, pipeline, db, signals });
@@ -201,7 +204,7 @@ app.listen(config.PORT, () => {
         .then(result => result && dashboard.postCompound(result))
         .catch(e => log.error('compound_startup_error', { module: 'index', error: e.message }));
     }
-  } else {
+  } else if (spBot) {
     spBot.start(); // fallback to old StockPulse bot
     log.info('stockpulse_bot_started', { module: 'index' });
   }

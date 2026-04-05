@@ -15,6 +15,7 @@ export function createPriceStream({ db, config, log, metrics }) {
 
   let wsConnected = false;
   let wsReconnectTimer = null;
+  let _pingInterval = null;
   let _anomalyHandler = null;
 
   // --- Price Cache ---
@@ -118,6 +119,7 @@ export function createPriceStream({ db, config, log, metrics }) {
   }
 
   function connectOKXWebSocket() {
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
     const ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
 
     ws.on('open', () => {
@@ -152,6 +154,7 @@ export function createPriceStream({ db, config, log, metrics }) {
 
     ws.on('close', () => {
       wsConnected = false;
+      if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
       _log.warn('ws_disconnected', { module: 'prices', exchange: 'OKX' });
       metrics?.record('ws_disconnect', 1, { exchange: 'OKX' });
       wsReconnectTimer = setTimeout(connectOKXWebSocket, 5000);
@@ -164,9 +167,9 @@ export function createPriceStream({ db, config, log, metrics }) {
     });
 
     // Ping every 25s to keep alive
-    const pingInterval = setInterval(() => {
+    _pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send('ping');
-      else clearInterval(pingInterval);
+      else { clearInterval(_pingInterval); _pingInterval = null; }
     }, 25000);
   }
 

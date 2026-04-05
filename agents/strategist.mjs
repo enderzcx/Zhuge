@@ -2,7 +2,8 @@
  * Strategist agent: evaluates active strategies against market conditions.
  */
 
-export function createStrategist({ db, agentRunner, messageBus, cache }) {
+export function createStrategist({ db, agentRunner, messageBus, cache, log }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { runAgent } = agentRunner;
   const { postMessage } = messageBus;
   const { insertDecision } = db;
@@ -121,16 +122,16 @@ Respond with JSON:
         const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         parsed = JSON.parse(jsonStr);
       } catch {
-        console.warn(`[Strategist] Parse failed: ${result.content.slice(0, 100)}`);
+        _log.warn('parse_failed', { module: 'strategist', raw: result.content.slice(0, 100) });
         return null;
       }
 
-      console.log(`[Strategist] ${parsed.active_strategies} strategies, ${parsed.triggered?.length || 0} triggered`);
+      _log.info('strategist_result', { module: 'strategist', active_strategies: parsed.active_strategies, triggered: parsed.triggered?.length || 0 });
 
       try {
         insertDecision.run(new Date().toISOString(), 'strategist', 'evaluate', '', '',
           JSON.stringify(parsed), 'Strategy evaluation', parsed.summary || '', '', analystSignal.confidence || 0, null);
-      } catch {}
+      } catch (e) { _log.warn('caught_error', { module: 'strategist', error: e.message }); }
 
       // If any strategy triggered, send through Risk gate
       if (parsed.triggered?.length > 0) {
@@ -143,7 +144,7 @@ Respond with JSON:
 
       return parsed;
     } catch (err) {
-      console.error(`[Strategist] Error: ${err.message}`);
+      _log.error('strategist_error', { module: 'strategist', error: err.message });
       return null;
     }
   }

@@ -2,7 +2,8 @@
  * Reviewer agent: trade review, signal accuracy analysis, lesson learning, weekly review.
  */
 
-export function createReviewer({ db, config, agentRunner, messageBus, telegram }) {
+export function createReviewer({ db, config, agentRunner, messageBus, telegram, log }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { runAgent } = agentRunner;
   const { insertDecision } = db;
 
@@ -192,7 +193,7 @@ Respond with JSON:
           INSERT INTO lessons (source, lesson, category, confidence, active, expires_at)
           VALUES ('reviewer', ?, ?, ?, 1, ?)
         `).run(args.lesson, args.category || 'general', args.confidence || 50, expiresAt);
-        console.log(`[Lesson] Saved: ${args.lesson.slice(0, 60)}...`);
+        _log.info('lesson_saved', { module: 'lesson', lesson: args.lesson.slice(0, 60) });
         return JSON.stringify({ success: true, id: result.lastInsertRowid });
       } catch (e) {
         return JSON.stringify({ error: e.message });
@@ -215,20 +216,20 @@ Respond with JSON:
         const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         parsed = JSON.parse(jsonStr);
       } catch {
-        console.warn(`[Reviewer] Parse failed: ${result.content.slice(0, 100)}`);
+        _log.warn('parse_failed', { module: 'reviewer', raw: result.content.slice(0, 100) });
         return null;
       }
 
-      console.log(`[Reviewer] Reviewed ${parsed.trades_reviewed} trades, ${parsed.strategy_updates?.length || 0} strategy updates`);
+      _log.info('review_result', { module: 'reviewer', trades_reviewed: parsed.trades_reviewed, strategy_updates: parsed.strategy_updates?.length || 0 });
 
       try {
         insertDecision.run(new Date().toISOString(), 'reviewer', 'review', '', '',
           JSON.stringify(parsed), 'Trade review', parsed.weekly_insight || '', '', 0, null);
-      } catch {}
+      } catch (e) { _log.warn('caught_error', { module: 'reviewer', error: e.message }); }
 
       return parsed;
     } catch (err) {
-      console.error(`[Reviewer] Error: ${err.message}`);
+      _log.error('reviewer_error', { module: 'reviewer', error: err.message });
       return null;
     }
   }
@@ -310,7 +311,7 @@ Respond with JSON:
     const last = db.prepare("SELECT timestamp FROM decisions WHERE agent = 'reviewer' AND action = 'weekly_review' ORDER BY timestamp DESC LIMIT 1").get();
     if (last && (Date.now() - new Date(last.timestamp).getTime()) < WEEKLY_INTERVAL_MS) return null;
 
-    console.log('[WeeklyReview] Starting weekly self-review...');
+    _log.info('weekly_review_start', { module: 'weekly_review' });
 
     try {
       const result = await runAgent('reviewer', WEEKLY_REVIEW_PROMPT, WEEKLY_TOOLS, WEEKLY_EXECUTORS,
@@ -323,17 +324,17 @@ Respond with JSON:
         const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         parsed = JSON.parse(jsonStr);
       } catch {
-        console.warn(`[WeeklyReview] Parse failed: ${result.content.slice(0, 100)}`);
+        _log.warn('parse_failed', { module: 'weekly_review', raw: result.content.slice(0, 100) });
         return null;
       }
 
-      console.log(`[WeeklyReview] PnL: ${parsed.total_pnl}, WinRate: ${parsed.win_rate}, Lessons: +${parsed.lessons_saved} -${parsed.lessons_deactivated}`);
+      _log.info('weekly_review_result', { module: 'weekly_review', total_pnl: parsed.total_pnl, win_rate: parsed.win_rate, lessons_saved: parsed.lessons_saved, lessons_deactivated: parsed.lessons_deactivated });
 
       // Record
       try {
         insertDecision.run(new Date().toISOString(), 'reviewer', 'weekly_review', '', '',
           JSON.stringify(parsed), 'Weekly self-review', parsed.telegram_summary || '', '', 0, null);
-      } catch {}
+      } catch (e) { _log.warn('caught_error', { module: 'weekly_review', error: e.message }); }
 
       // Push to Telegram if configured
       if (TG_BOT_TOKEN && TG_CHAT_ID && parsed.telegram_summary) {
@@ -344,15 +345,15 @@ Respond with JSON:
             body: JSON.stringify({ chat_id: TG_CHAT_ID, text: `📊 RIFI Weekly Report\n\n${parsed.telegram_summary}`, parse_mode: 'HTML' }),
             signal: AbortSignal.timeout(10000),
           });
-          console.log('[WeeklyReview] Telegram push sent');
+          _log.info('telegram_push_sent', { module: 'weekly_review' });
         } catch (e) {
-          console.error('[WeeklyReview] Telegram push failed:', e.message);
+          _log.error('telegram_push_failed', { module: 'weekly_review', error: e.message });
         }
       }
 
       return parsed;
     } catch (err) {
-      console.error(`[WeeklyReview] Error: ${err.message}`);
+      _log.error('weekly_review_error', { module: 'weekly_review', error: err.message });
       return null;
     }
   }

@@ -2,7 +2,8 @@
  * Risk agent: hard rules + LLM-based soft evaluation.
  */
 
-export function createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus }) {
+export function createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus, log }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { bitgetRequest } = bitgetClient;
   const { runAgent } = agentRunner;
   const { postMessage } = messageBus;
@@ -144,14 +145,14 @@ Your workflow:
       const positions = Array.isArray(posData) ? posData : (posData?.list || []);
       const unrealizedLoss = positions.reduce((s, p) => s + Math.min(0, parseFloat(p.unrealizedPL || '0')), 0);
       loss24h += unrealizedLoss;
-    } catch (e) { console.warn('[Risk] Failed to fetch unrealized PnL, loss check excludes floating:', e.message); }
+    } catch (e) { _log.warn('unrealized_pnl_fetch_failed', { module: 'risk', error: e.message }); }
     // Dynamic threshold: 5% of account equity (fetch from Bitget)
     let lossThreshold = 50; // fallback
     try {
       const accts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES').catch(() => []);
       const equity = parseFloat((accts || []).find(a => a.marginCoin === 'USDT')?.accountEquity || '0');
       if (equity > 0) lossThreshold = equity * 0.05;
-    } catch (e) { console.warn('[Risk] Failed to fetch equity, using fallback threshold $50:', e.message); }
+    } catch (e) { _log.warn('equity_fetch_failed', { module: 'risk', error: e.message, fallback_threshold: 50 }); }
     if (loss24h < -lossThreshold) {
       const reason = `24小时累计亏损 ${loss24h.toFixed(2)} USDC (含浮亏)，超过安全阈值 (${lossThreshold.toFixed(2)})`;
       postMessage('risk', 'executor', 'VETO', { reason }, traceId);
@@ -171,22 +172,22 @@ Your workflow:
         verdict = JSON.parse(jsonStr);
       } catch {
         // If can't parse, default to PASS with warning
-        console.warn(`[Risk] Could not parse verdict, defaulting to VETO (fail-closed). Raw: ${result.content.slice(0, 100)}`);
+        _log.warn('verdict_parse_failed', { module: 'risk', raw: result.content.slice(0, 100) });
         verdict = { verdict: 'VETO', reason: 'Risk agent parse error, defaulting VETO', risk_flags: ['parse_error'] };
       }
 
       const pass = verdict.verdict === 'PASS';
       postMessage('risk', 'executor', pass ? 'PASS' : 'VETO', verdict, traceId);
 
-      console.log(`[Risk] ${verdict.verdict}: ${verdict.reason}`);
+      _log.info('risk_verdict', { module: 'risk', verdict: verdict.verdict, reason: verdict.reason });
       try {
         insertDecision.run(now, 'risk', pass ? 'approve' : 'veto', '', '',
           JSON.stringify(verdict), `Risk check for signal`, verdict.reason, '', signal.confidence || 0, null);
-      } catch {}
+      } catch (e) { _log.warn('caught_error', { module: 'risk', error: e.message }); }
 
       return { pass, reason: verdict.reason, risk_flags: verdict.risk_flags || [] };
     } catch (err) {
-      console.error(`[Risk] Agent error: ${err.message}, defaulting to VETO (fail-closed)`);
+      _log.error('risk_agent_error', { module: 'risk', error: err.message });
       return { pass: false, reason: `Risk agent error: ${err.message}`, risk_flags: ['agent_error'] };
     }
   }

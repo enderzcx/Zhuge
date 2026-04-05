@@ -2,7 +2,8 @@
  * Generic agent runner: LLM with tool-calling loop.
  */
 
-export function createAgentRunner({ config, db, messageBus, metrics }) {
+export function createAgentRunner({ config, db, messageBus, metrics, log }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { insertDecision } = db;
 
   const agentMetrics = {}; // { analyst: { calls: 0, errors: 0, total_ms: 0, total_tokens: 0, last_run: null } }
@@ -84,7 +85,7 @@ export function createAgentRunner({ config, db, messageBus, metrics }) {
       // No tool calls → done
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         const totalMs = Date.now() - agentStart;
-        console.log(`[Agent:${agentName}] Done in ${round + 1} round(s), ${elapsed}s, ${totalTokens}tok [${agentModel}]`);
+        _log.info('agent_done', { module: 'runner', agent: agentName, rounds: round + 1, elapsed, tokens: totalTokens, model: agentModel });
         recordMetric(agentName, totalMs, totalTokens);
         metrics?.record('llm_latency_ms', totalMs, { agent: agentName, model: agentModel, rounds: round + 1 });
         metrics?.record('llm_tokens_in', totalInputTokens, { agent: agentName });
@@ -95,7 +96,9 @@ export function createAgentRunner({ config, db, messageBus, metrics }) {
       // Execute tool calls
       for (const tc of msg.tool_calls) {
         const fnName = tc.function.name;
-        const args = JSON.parse(tc.function.arguments || '{}');
+        let args;
+        try { args = JSON.parse(tc.function.arguments || '{}'); }
+        catch { args = {}; _log.warn('json_parse_failed', { module: 'runner', agent: agentName, tool: fnName, raw: (tc.function.arguments || '').slice(0, 100) }); }
         const executor = toolExecutors[fnName];
         let result;
         if (executor) {

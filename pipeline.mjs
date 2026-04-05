@@ -99,7 +99,7 @@ Rules:
 Output ONLY the JSON, no other text.`;
   }
 
-  async function runFullAnalysis(mode, crucix, news) {
+  async function runFullAnalysis(mode, crucix, news, cycleId) {
     const c = cache[mode];
     if (c.analyzing) return;
     c.analyzing = true;
@@ -115,7 +115,7 @@ Output ONLY the JSON, no other text.`;
         `Analyze current ${mode} market conditions. Time: ${now}. Fetch data using your tools, then produce the JSON report.`,
         { trace_id: traceId, max_tokens: 1000, timeout: 90000 }
       );
-      _metrics.record('llm_latency_ms', Date.now() - _analystStart, { agent: 'analyst', mode });
+      _metrics.record('llm_latency_ms', Date.now() - _analystStart, { agent: 'analyst', mode, cycleId });
       if (analystResult.tokensUsed) {
         _metrics.record('llm_tokens_in', analystResult.tokensUsed.input || 0, { agent: 'analyst' });
         _metrics.record('llm_tokens_out', analystResult.tokensUsed.output || 0, { agent: 'analyst' });
@@ -137,6 +137,7 @@ Output ONLY the JSON, no other text.`;
         mode,
         timestamp: now,
         trace_id: traceId,
+        cycle_id: cycleId,
         raw_sources: { crucix: analystResult.toolCalls.some(t => t.name === 'get_crucix_data'), news: analystResult.toolCalls.some(t => t.name === 'get_crypto_news') },
         agent: 'analyst',
       };
@@ -144,7 +145,7 @@ Output ONLY the JSON, no other text.`;
 
       const sentimentKey = mode === 'stock' ? 'stock_sentiment' : 'crypto_sentiment';
       const sentimentVal = parsed[sentimentKey] || 0;
-      log.info('analyst_result', { module: 'pipeline', mode, risk: parsed.macro_risk_score, sentiment: sentimentVal, bias: parsed.technical_bias, action: parsed.recommended_action, push: parsed.push_worthy, tools: analystResult.toolCalls.length });
+      log.info('analyst_result', { module: 'pipeline', mode, cycleId, risk: parsed.macro_risk_score, sentiment: sentimentVal, bias: parsed.technical_bias, action: parsed.recommended_action, push: parsed.push_worthy, tools: analystResult.toolCalls.length });
 
       // Persist to SQLite
       persistAnalysis(mode, parsed, now);
@@ -234,8 +235,8 @@ Output ONLY the JSON, no other text.`;
         c.patrolCounter = 0;
       }
     } catch (err) {
-      log.error('analysis_error', { module: 'pipeline', mode, error: err.message });
-      _metrics.record('error_count', 1, { module: 'pipeline', type: 'analysis' });
+      log.error('analysis_error', { module: 'pipeline', mode, cycleId, error: err.message });
+      _metrics.record('error_count', 1, { module: 'pipeline', type: 'analysis', cycleId });
     }
     c.analyzing = false;
   }
@@ -374,8 +375,8 @@ ${summary}
     if (newsCount > 0) persistNews(news);
 
     // Run crypto analysis (stock disabled to save tokens)
-    await runFullAnalysis('crypto', crucix, news);
-    // await runFullAnalysis('stock', crucix, news);
+    await runFullAnalysis('crypto', crucix, news, cycleId);
+    // await runFullAnalysis('stock', crucix, news, cycleId);
 
     // Score historical signals (non-blocking)
     try { scoreHistoricalSignals(); } catch (e) { log.error('signal_score_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'signal_score', cycleId }); }

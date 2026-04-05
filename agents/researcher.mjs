@@ -4,7 +4,8 @@
  * 4 dimensions: Volume Momentum, Price Action (ORB), Market Context, Narrative Heat.
  */
 
-export function createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources }) {
+export function createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources, log }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { bitgetPublic } = bitgetClient;
   const { runAgent } = agentRunner;
   const { parseCandles } = indicators;
@@ -298,7 +299,7 @@ Output ONLY this JSON:
             })),
           });
         } catch (e) {
-          console.warn(`[Researcher] Narrative fetch failed for ${baseSymbol}:`, e.message);
+          _log.warn('narrative_fetch_failed', { module: 'researcher', symbol: baseSymbol, error: e.message });
           return JSON.stringify({ note: 'News unavailable, score narrative as 50' });
         }
       },
@@ -334,12 +335,12 @@ Output ONLY this JSON:
         db.insertDecision.run(new Date().toISOString(), 'researcher', 'research', 'evaluate',
           JSON.stringify({ symbol, candidateData }), JSON.stringify(parsed),
           `Research: ${symbol}`, parsed.reasoning || '', '', parsed.total_score || 0, null);
-      } catch {}
+      } catch (e) { _log.warn('caught_error', { module: 'researcher', error: e.message }); }
 
-      console.log(`[Researcher] ${symbol}: score=${parsed.total_score} verdict=${parsed.verdict} dir=${parsed.direction} | ${parsed.reasoning?.slice(0, 100)}`);
+      _log.info('research_result', { module: 'researcher', symbol, score: parsed.total_score, verdict: parsed.verdict, direction: parsed.direction, reasoning: parsed.reasoning?.slice(0, 100) });
       return parsed;
     } catch (err) {
-      console.error(`[Researcher] ${symbol} failed:`, err.message);
+      _log.error('research_failed', { module: 'researcher', symbol, error: err.message });
       return null;
     }
   }
