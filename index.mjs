@@ -43,8 +43,9 @@ import { createConfirmHandler } from './agent/telegram/confirm.mjs';
 import { createAgentBot } from './agent/telegram/bot.mjs';
 import { createProvenance } from './agent/cognition/provenance.mjs';
 import { createCompound } from './agent/cognition/compound.mjs';
-// Push Engine (Phase 3)
+// Push Engine (Phase 3) + Dashboard (Phase 4)
 import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
+import { createDashboard } from './agent/push/dashboard.mjs';
 // StockPulse Telegram Bot (deprecated, kept for backward compat if AGENT_BOT not configured)
 import { createLLMQueue } from './stockpulse/llm-queue.mjs';
 import { createPushEngine as createSPPushEngine } from './stockpulse/push-engine.mjs';
@@ -174,9 +175,14 @@ app.listen(config.PORT, () => {
   if (config.TG_BOT_TOKEN) {
     agentBot.startPolling();
     log.info('agent_bot_started', { module: 'index' });
-    // Check compound on startup
+    // Dashboard: scheduled TG posts (positions, observe, charts)
+    const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log });
+    dashboard.start();
+    // Check compound on startup, post result to dashboard
     if (agentCompound.shouldRun()) {
-      agentCompound.run().catch(e => log.error('compound_startup_error', { module: 'index', error: e.message }));
+      agentCompound.run()
+        .then(result => result && dashboard.postCompound(result))
+        .catch(e => log.error('compound_startup_error', { module: 'index', error: e.message }));
     }
   } else {
     spBot.start(); // fallback to old StockPulse bot

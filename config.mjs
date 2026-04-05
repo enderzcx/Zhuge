@@ -72,6 +72,10 @@ export function createConfig() {
   const SP_BOT_TOKEN = process.env.SP_TELEGRAM_BOT_TOKEN || '';
   const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || SP_BOT_TOKEN; // agent bot (fallback to SP)
   const TG_CHAT_ID = process.env.TG_CHAT_ID || '';               // owner chat ID for auth
+  const TG_DASHBOARD_CHAT = process.env.TG_DASHBOARD_CHAT || ''; // supergroup for dashboard (optional)
+  const TG_TOPIC_POSITIONS = process.env.TG_TOPIC_POSITIONS || '';
+  const TG_TOPIC_OBSERVE = process.env.TG_TOPIC_OBSERVE || '';
+  const TG_TOPIC_COMPOUND = process.env.TG_TOPIC_COMPOUND || '';
 
   const PRICE_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
   const ANOMALY_THRESHOLD = 0.02;  // 2% in 5min → instant analysis
@@ -122,5 +126,6 @@ export function createConfig() {
     PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
     SP_BOT_TOKEN, TG_BOT_TOKEN, TG_CHAT_ID,
+    TG_DASHBOARD_CHAT, TG_TOPIC_POSITIONS, TG_TOPIC_OBSERVE, TG_TOPIC_COMPOUND,
   };
 }
