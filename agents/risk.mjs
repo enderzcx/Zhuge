@@ -134,10 +134,17 @@ Your workflow:
       }
     }
 
-    // Check 24h cumulative loss > 5% (approximate using USDC terms)
+    // Check 24h cumulative loss > 5% — includes realized + unrealized
     const h24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const recent24h = db.prepare('SELECT pnl FROM trades WHERE status = ? AND closed_at > ?').all('closed', h24);
-    const loss24h = recent24h.reduce((s, t) => s + Math.min(0, t.pnl || 0), 0);
+    let loss24h = recent24h.reduce((s, t) => s + Math.min(0, t.pnl || 0), 0);
+    // Include unrealized PnL from open positions (floating losses count)
+    try {
+      const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+      const positions = Array.isArray(posData) ? posData : (posData?.list || []);
+      const unrealizedLoss = positions.reduce((s, p) => s + Math.min(0, parseFloat(p.unrealizedPL || '0')), 0);
+      loss24h += unrealizedLoss;
+    } catch {}
     // Dynamic threshold: 5% of account equity (fetch from Bitget)
     let lossThreshold = 50; // fallback
     try {
@@ -146,7 +153,7 @@ Your workflow:
       if (equity > 0) lossThreshold = equity * 0.05;
     } catch {}
     if (loss24h < -lossThreshold) {
-      const reason = `24小时累计亏损 ${loss24h.toFixed(2)} USDC，超过安全阈值 (${lossThreshold.toFixed(2)})`;
+      const reason = `24小时累计亏损 ${loss24h.toFixed(2)} USDC (含浮亏)，超过安全阈值 (${lossThreshold.toFixed(2)})`;
       postMessage('risk', 'executor', 'VETO', { reason }, traceId);
       return { pass: false, reason, risk_flags: ['24h_loss_limit'] };
     }

@@ -317,13 +317,18 @@ Rules:
       return;
     }
 
-    // 3. Check 24h momentum losses
+    // 3. Check 24h momentum losses (realized + unrealized)
     const losses24h = db.prepare(
       "SELECT COALESCE(SUM(ABS(pnl)), 0) as total_loss FROM trades WHERE status = 'closed' AND pnl < 0 AND trade_id LIKE 'res_%' AND closed_at > datetime('now', '-1 day')"
     ).get();
+    // Include unrealized losses from open momentum positions
+    const openMomentumPnl = db.prepare(
+      "SELECT COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as float_loss FROM trades WHERE status = 'open' AND trade_id LIKE 'res_%'"
+    ).get();
+    const totalLoss24h = losses24h.total_loss + (openMomentumPnl?.float_loss || 0);
     const maxLoss = _overrides.max_daily_loss || MOMENTUM.max_daily_loss;
-    if (losses24h.total_loss >= maxLoss) {
-      _log.info('momentum_daily_loss_limit', { module: 'momentum', loss_24h: losses24h.total_loss, max_loss: maxLoss });
+    if (totalLoss24h >= maxLoss) {
+      _log.info('momentum_daily_loss_limit', { module: 'momentum', realized: losses24h.total_loss, floating: openMomentumPnl?.float_loss || 0, total: totalLoss24h, max_loss: maxLoss });
       return;
     }
 

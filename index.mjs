@@ -214,4 +214,26 @@ app.listen(config.PORT, () => {
     spBot.start(); // fallback to old StockPulse bot
     log.info('stockpulse_bot_started', { module: 'index' });
   }
+
+  // --- Graceful shutdown ---
+  async function shutdown(signal) {
+    log.info('shutdown_start', { module: 'index', signal });
+    try {
+      // Stop accepting new work
+      if (agentBot?.stop) agentBot.stop();
+      health.stop();
+      // Sync trades one last time (detect fills before exit)
+      await bitgetExec.checkAndSyncTrades().catch(() => {});
+      // Flush logs
+      const { stop: stopLogger } = await import('./agent/observe/logger.mjs').catch(() => ({}));
+      // Close DB (flushes WAL)
+      if (db.db?.close) db.db.close();
+      log.info('shutdown_done', { module: 'index', signal });
+    } catch (e) {
+      log.error('shutdown_error', { module: 'index', error: e.message });
+    }
+    process.exit(0);
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 });

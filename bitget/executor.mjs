@@ -77,13 +77,14 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     const halfKelly = kelly * 0.5; // half-Kelly for safety
     const fraction = Math.min(halfKelly, 0.25); // cap at 25%
 
-    // Convert USDT margin → notional → contract size (10x leverage)
+    // Convert USDT margin → notional → contract size (use dynamic leverage)
     if (!currentPrice || currentPrice <= 0) {
       _log.warn('no_valid_price', { module: 'kelly', symbol });
       return 0; // caller must check for 0 and abort
     }
+    const effectiveLeverage = config.SCALING?.leverage || config.MOMENTUM?.leverage || 10;
     const usdtMargin = fraction * available;
-    const contractSize = (usdtMargin * 10) / currentPrice; // leverage=10
+    const contractSize = (usdtMargin * effectiveLeverage) / currentPrice;
 
     const result = Math.max(minSize, parseFloat(contractSize.toFixed(4)));
     _log.info('kelly_calc', { module: 'kelly', symbol, p: p.toFixed(2), b: b.toFixed(2), f: kelly.toFixed(3), half: fraction.toFixed(3), size: result, available: available.toFixed(2), price: currentPrice });
@@ -112,7 +113,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     const rawSymbol = (signal.symbol || 'ETHUSDT').toUpperCase();
     const symbol = SUPPORTED_SYMBOLS.includes(rawSymbol) ? rawSymbol : 'ETHUSDT';
     if (rawSymbol !== symbol) _log.warn('unknown_symbol', { module: 'bitget_exec', rawSymbol: signal.symbol, fallback: symbol });
-    const leverage = '10';
+    const leverage = String(config.SCALING?.leverage || config.MOMENTUM?.leverage || 10);
 
     // Smart order type: confidence >= 80 → market, 60-80 → limit
     const useLimit = confidence >= 60 && confidence < 80;
@@ -431,7 +432,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const isBuy = ['strong_buy', 'increase_exposure'].includes(action);
       const side = isBuy ? 'buy' : 'sell';
       const holdSide = isBuy ? 'long' : 'short';
-      const leverage = '10';
+      const leverage = String(SCALING?.leverage || config.MOMENTUM?.leverage || 10);
 
       // Check balance
       const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
@@ -567,7 +568,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       // Set leverage
       await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
-        symbol: group.symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', leverage: '10', holdSide,
+        symbol: group.symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', leverage: String(SCALING?.leverage || config.MOMENTUM?.leverage || 10), holdSide,
       }).catch(() => {});
 
       // Place order
