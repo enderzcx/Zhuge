@@ -609,16 +609,17 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 - [x] TG 追问带上下文 (recent_pushes tool + prompt 注入最近推送)
 - [ ] 部署验证: 等待下一轮 FLASH 级新闻，确认推送 + 追问
 
-### Phase 4: Dashboard — Web 看板
-- [ ] dashboard/ Next.js 项目初始化
-- [ ] TradeAgent API 扩展 (metrics/decisions/pushes 接口)
-- [ ] 主看板: 持仓 + PnL + 状态
-- [ ] 交易历史 + PnL 曲线
-- [ ] 决策时间线
-- [ ] 可观测性图表 + 日志流
-- [ ] 推送历史
-- [ ] ecosystem.config.cjs 加 dashboard 进程
-- [ ] 部署验证: 浏览器访问看板，数据实时更新
+### Phase 4: TG Channel Dashboard — 零额外资源可观测看板
+> 方案变更: Web Dashboard → TG Supergroup + Topics
+> 原因: TG bot 已能查所有数据, TG Channel 自带推送+移动端+追问, 零额外内存
+
+- [x] codex_status 工具 — 查看 Codex 反代状态 + API 可用模型
+- [x] Codex proxy 自动更新 — cron 每小时 pull + restart
+- [ ] TG Supergroup 创建 + topics (#positions, #trades, #observe, #compound, #pushes)
+- [ ] 定时推送: #positions (每5min pinned更新), #observe (每30min系统状态)
+- [ ] PnL 曲线图片生成 (quickchart.io 或 node-canvas) → 发 TG 图片
+- [ ] Compound rules 推送: compound 跑完自动发 #compound
+- [ ] 部署验证: TG 频道各 topic 有自动更新内容
 
 ### Phase 5: Primary Market — 一级市场 (后续)
 - [ ] Base V3 Factory PoolCreated 事件监听

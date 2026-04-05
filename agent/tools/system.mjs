@@ -74,6 +74,12 @@ export function createSystemTools({ log }) {
       parameters: { type: 'object', properties: {}, required: [] },
       requiresConfirmation: false,
     },
+    {
+      name: 'codex_status',
+      description: '查看 Codex 反代状态 (http://YOUR_VPS_IP:8080)',
+      parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
   ];
 
   const EXECUTORS = {
@@ -156,6 +162,49 @@ export function createSystemTools({ log }) {
           execSync('df -h / | tail -1', { encoding: 'utf-8', timeout: 5000 }).trim(),
         ];
         return parts.join('\n\n');
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    },
+
+    async codex_status() {
+      try {
+        // Docker container status
+        const container = execSync(
+          "sudo docker ps --filter name=codex-proxy --format '{{.Status}} | Image: {{.Image}} | Ports: {{.Ports}}'",
+          { encoding: 'utf-8', timeout: 5000 }
+        ).trim();
+
+        // Health check via API
+        let apiStatus = 'unknown';
+        try {
+          const res = await fetch('http://127.0.0.1:8080/v1/models', {
+            signal: AbortSignal.timeout(5000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const models = data.data?.map(m => m.id).join(', ') || 'none';
+            apiStatus = `OK (${models})`;
+          } else {
+            apiStatus = `HTTP ${res.status}`;
+          }
+        } catch (e) {
+          apiStatus = `Error: ${e.message}`;
+        }
+
+        // Last auto-update check
+        let lastUpdate = 'never';
+        try {
+          lastUpdate = execSync('tail -1 /home/ubuntu/codex-proxy/update.log 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim() || 'no log';
+        } catch {}
+
+        return [
+          `Container: ${container || 'not running'}`,
+          `API: ${apiStatus}`,
+          `Auto-update: cron hourly`,
+          `Last check: ${lastUpdate}`,
+          `Dashboard: http://YOUR_VPS_IP:8080/#/`,
+        ].join('\n');
       } catch (err) {
         return `Error: ${err.message}`;
       }
