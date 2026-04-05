@@ -2,7 +2,7 @@
  * Generic agent runner: LLM with tool-calling loop.
  */
 
-export function createAgentRunner({ config, db, messageBus }) {
+export function createAgentRunner({ config, db, messageBus, metrics }) {
   const { insertDecision } = db;
 
   const agentMetrics = {}; // { analyst: { calls: 0, errors: 0, total_ms: 0, total_tokens: 0, last_run: null } }
@@ -32,6 +32,8 @@ export function createAgentRunner({ config, db, messageBus }) {
     const maxRounds = opts.max_rounds || 5;
     const agentStart = Date.now();
     let totalTokens = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
     const messages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage },
@@ -73,6 +75,8 @@ export function createAgentRunner({ config, db, messageBus }) {
       const msg = data.choices?.[0]?.message;
       if (!msg) throw new Error('No message in LLM response');
       totalTokens += data.usage?.total_tokens || 0;
+      totalInputTokens += data.usage?.prompt_tokens || 0;
+      totalOutputTokens += data.usage?.completion_tokens || 0;
 
       messages.push(msg);
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
@@ -82,6 +86,9 @@ export function createAgentRunner({ config, db, messageBus }) {
         const totalMs = Date.now() - agentStart;
         console.log(`[Agent:${agentName}] Done in ${round + 1} round(s), ${elapsed}s, ${totalTokens}tok [${agentModel}]`);
         recordMetric(agentName, totalMs, totalTokens);
+        metrics?.record('llm_latency_ms', totalMs, { agent: agentName, model: agentModel, rounds: round + 1 });
+        metrics?.record('llm_tokens_in', totalInputTokens, { agent: agentName });
+        metrics?.record('llm_tokens_out', totalOutputTokens, { agent: agentName });
         return { content: msg.content || '', toolCalls: allToolCalls, trace_id: traceId };
       }
 
@@ -113,11 +120,16 @@ export function createAgentRunner({ config, db, messageBus }) {
 
     // Max rounds reached
     const lastContent = messages[messages.length - 1]?.content || '';
-    recordMetric(agentName, Date.now() - agentStart, totalTokens);
+    const totalMs = Date.now() - agentStart;
+    recordMetric(agentName, totalMs, totalTokens);
+    metrics?.record('llm_latency_ms', totalMs, { agent: agentName, model: agentModel, rounds: maxRounds });
+    metrics?.record('llm_tokens_in', totalInputTokens, { agent: agentName });
+    metrics?.record('llm_tokens_out', totalOutputTokens, { agent: agentName });
     return { content: lastContent, toolCalls: allToolCalls, trace_id: traceId };
 
     } catch (err) {
       recordMetric(agentName, Date.now() - agentStart, totalTokens, true);
+      metrics?.record('llm_error', 1, { agent: agentName, error: err.message?.slice(0, 100) });
       throw err;
     }
   }

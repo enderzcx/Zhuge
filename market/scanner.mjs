@@ -4,11 +4,12 @@
 
 import { calcRSI, calcBollinger } from './indicators.mjs';
 
-export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher, compound }) {
+export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher, compound, log, metrics }) {
   const { bitgetPublic, bitgetRequest, roundPrice } = bitgetClient;
   const { runAgent } = agentRunner;
   const { insertDecision, insertTrade, insertCandidate, updateCandidateResearch, markCandidateTraded } = db;
   const MOMENTUM = config.MOMENTUM;
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
 
   // Cache known symbols to detect new listings
   let _knownSymbols = new Set();
@@ -19,7 +20,7 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
    */
   async function scanMarketOpportunities() {
     if (!config.BITGET_API_KEY) return [];
-    console.log('[Scanner] Scanning futures market...');
+    _log.info('scanning', { module: 'scanner' });
 
     try {
       const tickers = await bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
@@ -65,10 +66,10 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
         } catch {}
       }
 
-      console.log(`[Scanner] Found ${opportunities.length} opportunities from ${candidates.length} candidates`);
+      _log.info('scan_result', { module: 'scanner', opportunities: opportunities.length, candidates: candidates.length });
       return opportunities;
     } catch (err) {
-      console.error('[Scanner] Error:', err.message);
+      _log.error('scanner_error', { module: 'scanner', error: err.message });
       return [];
     }
   }
@@ -79,7 +80,7 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
    */
   async function reviewPendingOrders() {
     if (!config.BITGET_API_KEY) return;
-    console.log('[PendingReview] Reviewing pending orders...');
+    _log.info('reviewing_pending_orders', { module: 'pending_review' });
 
     try {
       const pendingData = await bitgetRequest('GET', '/api/v2/mix/order/orders-pending?productType=USDT-FUTURES');
@@ -87,10 +88,10 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
 
       const limitOrders = allPending.filter(o => o.orderType !== 'plan');
       if (!limitOrders.length) {
-        console.log('[PendingReview] No pending limit orders to review');
+        _log.info('no_pending_orders', { module: 'pending_review' });
         return;
       }
-      console.log(`[PendingReview] ${limitOrders.length} pending limit order(s) to review`);
+      _log.info('pending_orders_found', { module: 'pending_review', count: limitOrders.length });
 
       let positions = [];
       try {
@@ -152,7 +153,7 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
       // LLM review if 2+ orders remain after auto-cancel
       let llmCancelIds = new Set();
       if (toKeep.length >= 2) {
-        console.log(`[PendingReview] ${toKeep.length} orders surviving auto-cancel, asking LLM...`);
+        _log.info('llm_review_start', { module: 'pending_review', surviving: toKeep.length });
         try {
           const orderSummary = toKeep.map(o => ({
             orderId: o.orderId, symbol: o.symbol, side: o.side,
@@ -178,9 +179,9 @@ Rules:
           const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
           const parsed = JSON.parse(jsonStr);
           llmCancelIds = new Set(parsed.cancel || []);
-          console.log(`[PendingReview] LLM wants to cancel ${llmCancelIds.size} orders: ${parsed.reason}`);
+          _log.info('llm_review_result', { module: 'pending_review', cancel_count: llmCancelIds.size, reason: parsed.reason });
         } catch (e) {
-          console.warn('[PendingReview] LLM review failed, proceeding with auto-cancel only:', e.message);
+          _log.warn('llm_review_failed', { module: 'pending_review', error: e.message });
         }
       }
 
@@ -194,7 +195,7 @@ Rules:
           await bitgetRequest('POST', '/api/v2/mix/order/cancel-order', {
             symbol: order.symbol, productType: 'USDT-FUTURES', orderId: order.orderId,
           });
-          console.log(`[PendingReview] Cancelled ${order.symbol} ${order.side} @ ${order.price} | reason: ${reason}`);
+          _log.info('order_cancelled', { module: 'pending_review', symbol: order.symbol, side: order.side, price: order.price, reason });
 
           insertDecision.run(
             new Date().toISOString(), 'scanner', 'cancel_pending', 'cancel-order',
@@ -204,13 +205,13 @@ Rules:
 
           await new Promise(r => setTimeout(r, 100));
         } catch (e) {
-          console.error(`[PendingReview] Cancel failed for ${order.orderId}:`, e.message);
+          _log.error('cancel_failed', { module: 'pending_review', orderId: order.orderId, error: e.message });
         }
       }
 
-      console.log(`[PendingReview] Done. Cancelled: ${allToCancel.length}, Kept: ${limitOrders.length - allToCancel.length}`);
+      _log.info('pending_review_done', { module: 'pending_review', cancelled: allToCancel.length, kept: limitOrders.length - allToCancel.length });
     } catch (err) {
-      console.error('[PendingReview] Error:', err.message);
+      _log.error('pending_review_error', { module: 'pending_review', error: err.message });
     }
   }
 
@@ -222,7 +223,7 @@ Rules:
    */
   async function discoverNewCoins() {
     if (!MOMENTUM?.enabled || !config.BITGET_API_KEY) return [];
-    console.log('[Discovery] Scanning for new/trending coins...');
+    _log.info('scanning_coins', { module: 'discovery' });
 
     try {
       const tickers = await bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
@@ -241,7 +242,7 @@ Rules:
             if (t) newListings.push({ symbol: sym, type: 'new_listing', ...parseTicker(t) });
           }
         }
-        if (newListings.length > 0) console.log(`[Discovery] ${newListings.length} NEW listings: ${newListings.map(n => n.symbol).join(', ')}`);
+        if (newListings.length > 0) _log.info('new_listings_detected', { module: 'discovery', count: newListings.length, symbols: newListings.map(n => n.symbol) });
       }
       _knownSymbols = currentSymbols;
       _bootCycles++;
@@ -274,10 +275,10 @@ Rules:
         } catch {} // ignore duplicate
       }
 
-      console.log(`[Discovery] Found ${newListings.length} new + ${trending.length} trending = ${unique.length} candidates`);
+      _log.info('discovery_result', { module: 'discovery', new_listings: newListings.length, trending: trending.length, total: unique.length });
       return unique;
     } catch (err) {
-      console.error('[Discovery] Error:', err.message);
+      _log.error('discovery_error', { module: 'discovery', error: err.message });
       return [];
     }
   }
@@ -296,7 +297,7 @@ Rules:
   /**
    * Run research + trade for discovered candidates.
    */
-  async function runMomentumPipeline() {
+  async function runMomentumPipeline(cycleId) {
     if (!MOMENTUM?.enabled || !researcher) return;
 
     // Compound param overrides (AI-decided parameters)
@@ -312,7 +313,7 @@ Rules:
     ).get();
     const maxOpen = _overrides.max_open || MOMENTUM.max_open;
     if (openMomentum.cnt >= maxOpen) {
-      console.log(`[Momentum] Already ${openMomentum.cnt} open momentum trades (max ${maxOpen}), skip`);
+      _log.info('momentum_slots_full', { module: 'momentum', open: openMomentum.cnt, max: maxOpen });
       return;
     }
 
@@ -322,7 +323,7 @@ Rules:
     ).get();
     const maxLoss = _overrides.max_daily_loss || MOMENTUM.max_daily_loss;
     if (losses24h.total_loss >= maxLoss) {
-      console.log(`[Momentum] 24h loss $${losses24h.total_loss.toFixed(2)} >= max $${maxLoss}, pause`);
+      _log.info('momentum_daily_loss_limit', { module: 'momentum', loss_24h: losses24h.total_loss, max_loss: maxLoss });
       return;
     }
 
@@ -355,7 +356,7 @@ Rules:
           }
         }
       } catch (err) {
-        console.error(`[Momentum] ${candidate.symbol} research/trade error:`, err.message);
+        _log.error('momentum_research_error', { module: 'momentum', symbol: candidate.symbol, error: err.message });
       }
     }
   }
@@ -365,7 +366,7 @@ Rules:
    */
   async function executeMomentumTrade(symbol, report) {
     if (!tradingLock || !tradingLock.acquire()) {
-      console.log('[Momentum] Trading lock active, skip');
+      _log.info('trading_lock_active', { module: 'momentum' });
       return false;
     }
 
@@ -384,7 +385,7 @@ Rules:
       const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
       const marginPerTrade = overrides.margin_per_trade || MOMENTUM.margin_per_trade;
       if (available < marginPerTrade) {
-        console.log(`[Momentum] Insufficient margin: $${available.toFixed(2)} < $${marginPerTrade}`);
+        _log.info('insufficient_margin', { module: 'momentum', available, required: marginPerTrade });
         return false;
       }
 
@@ -393,7 +394,7 @@ Rules:
         const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
         const positions = Array.isArray(posData) ? posData : (posData?.list || []);
         if (positions.find(p => p.symbol === symbol && p.holdSide === holdSide && parseFloat(p.total || '0') > 0)) {
-          console.log(`[Momentum] Already have ${holdSide} on ${symbol}, skip`);
+          _log.info('duplicate_position', { module: 'momentum', symbol, side: holdSide });
           return false;
         }
       } catch {}
@@ -406,7 +407,7 @@ Rules:
         currentPrice = parseFloat(t?.lastPr || '0');
       } catch {}
       if (!currentPrice) {
-        console.error(`[Momentum] No price for ${symbol}, abort`);
+        _log.error('no_price', { module: 'momentum', symbol });
         return false;
       }
 
@@ -440,7 +441,7 @@ Rules:
       const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
       const orderId = order?.orderId;
 
-      console.log(`[Momentum] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x MARKET @ $${currentPrice} | score:${report.total_score} | SL:$${sl} TP:$${tp} | orderId: ${orderId}`);
+      _log.info('momentum_trade', { module: 'momentum', side: holdSide, size, symbol, leverage, price: currentPrice, score: report.total_score, sl, tp, orderId });
 
       // Record trade
       const tradeId = `res_${orderId || Date.now()}`;
@@ -460,15 +461,15 @@ Rules:
             const fillPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
             if (fillPrice > 0) {
               db.prepare('UPDATE trades SET entry_price = ? WHERE trade_id = ?').run(fillPrice, tradeId);
-              console.log(`[Momentum] Entry price: ${tradeId} @ $${fillPrice}`);
+              _log.info('entry_price_updated', { module: 'momentum', tradeId, fillPrice });
             }
-          } catch (e) { console.warn(`[Momentum] Fill price fetch failed for ${tradeId}:`, e.message); }
+          } catch (e) { _log.warn('fill_price_fetch_failed', { module: 'momentum', tradeId, error: e.message }); }
         }, 3000);
       }
 
       return true;
     } catch (err) {
-      console.error(`[Momentum] ${symbol} trade failed:`, err.message);
+      _log.error('momentum_trade_failed', { module: 'momentum', symbol, error: err.message });
       return false;
     } finally {
       tradingLock.release();

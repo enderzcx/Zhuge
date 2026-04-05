@@ -69,30 +69,32 @@ app.use(express.json());
 const db = createDB();
 const metrics = createMetrics(db.db);
 const { log } = createLogger();
-const health = createHealthMonitor(metrics);
+// alertFn wired after pushEngine creation below
+const _alertRef = { fn: null };
+const health = createHealthMonitor(metrics, { log, alertFn: (msg) => _alertRef.fn?.(msg) });
 health.start();
 const llm = createLLM(config);
-const bitgetClient = createBitgetClient(config);
+const bitgetClient = createBitgetClient(config, { metrics, log });
 const messageBus = createMessageBus({ db });
-const agentRunner = createAgentRunner({ config, db, messageBus });
+const agentRunner = createAgentRunner({ config, db, messageBus, metrics });
 const dataSources = createDataSources(config);
-const priceStream = createPriceStream({ db, config });
+const priceStream = createPriceStream({ db, config, log, metrics });
 const signals = createSignalScoring({ db });
 const lifi = createLiFi(config);
 const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators });
-const riskAgent = createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus });
+const riskAgent = createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
   stock:  { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
 };
-const strategist = createStrategist({ db, agentRunner, messageBus, cache });
+const strategist = createStrategist({ db, agentRunner, messageBus, cache, log });
 const telegram = createTelegram({ db, config, agentMetrics: agentRunner.agentMetrics, cache });
-const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram });
+const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram, log });
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
-const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer });
-const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources });
+const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer, log, metrics });
+const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources, log });
 const _compoundRef = { instance: null };
-const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {} } });
+const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {} }, log, metrics });
 // Push engine created after agentBot (needs tgSend)
 let pushEngine = null; // initialized after bot creation
 
@@ -139,6 +141,7 @@ confirmHandler.setTgCall(agentBot.tgCall);
 const tgSend = (text) => agentBot.sendMessage(config.TG_CHAT_ID, text);
 pushEngine = createSmartPush({ db, config, tgSend, tgCall: agentBot.tgCall, log, metrics });
 _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
+_alertRef.fn = (msg) => pushEngine.pushError('health', msg); // wire health alerts → TG
 
 // Create pipeline (after push engine)
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine });

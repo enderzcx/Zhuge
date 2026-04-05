@@ -6,16 +6,42 @@
 import { cpus, freemem, totalmem } from 'os';
 
 const SAMPLE_INTERVAL = 60 * 1000; // 1 min
+const ALERT_COOLDOWN = 30 * 60 * 1000; // 30 min
 
-export function createHealthMonitor(metrics) {
+const THRESHOLDS = {
+  heap_pct:       85,
+  event_loop_ms: 500,
+  mem_pct:        90,
+};
+
+export function createHealthMonitor(metrics, { log, alertFn } = {}) {
   let timer = null;
   let prevCpuUsage = null;
+  /** @type {Record<string, number>} last alert timestamp per type */
+  const lastAlert = {};
+
+  function _maybeAlert(type, value, threshold) {
+    if (value <= threshold) return;
+    const now = Date.now();
+    if (lastAlert[type] && now - lastAlert[type] < ALERT_COOLDOWN) return;
+    lastAlert[type] = now;
+    const rounded = Math.round(value * 10) / 10;
+    const msg = `Health alert: ${type} = ${rounded} (threshold ${threshold})`;
+    if (log) log.warn('health_alert', { type, value, threshold });
+    if (alertFn) alertFn(msg);
+  }
+
+  function _checkThresholds(heapPct, memPct) {
+    _maybeAlert('heap_pct', heapPct, THRESHOLDS.heap_pct);
+    _maybeAlert('mem_pct', memPct, THRESHOLDS.mem_pct);
+  }
 
   function sample() {
     // Heap
     const heap = process.memoryUsage();
     metrics.record('system_heap_mb', Math.round(heap.heapUsed / 1024 / 1024));
     metrics.record('system_rss_mb', Math.round(heap.rss / 1024 / 1024));
+    const heapPct = heap.heapUsed / heap.heapTotal * 100;
 
     // System memory
     const totalMem = totalmem();
@@ -40,11 +66,15 @@ export function createHealthMonitor(metrics) {
     }
     prevCpuUsage = total;
 
+    // Check non-async thresholds
+    _checkThresholds(heapPct, usedPct);
+
     // Event loop latency (rough)
     const start = performance.now();
     setImmediate(() => {
       const lag = performance.now() - start;
       metrics.record('system_event_loop_ms', Math.round(lag * 100) / 100);
+      _maybeAlert('event_loop_ms', lag, THRESHOLDS.event_loop_ms);
     });
   }
 

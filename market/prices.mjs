@@ -4,7 +4,8 @@
 
 import WebSocket from 'ws';
 
-export function createPriceStream({ db, config }) {
+export function createPriceStream({ db, config, log, metrics }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { insertCandle } = db;
 
   const PRICE_PAIRS = config.PRICE_PAIRS || ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
@@ -107,7 +108,8 @@ export function createPriceStream({ db, config }) {
 
     const direction = anomaly.change > 0 ? 'up' : 'down';
     const pctStr = (anomaly.change * 100).toFixed(2);
-    console.log(`[PriceAlert:${anomaly.level}] ${anomaly.pair} ${direction} ${pctStr}% in 5min → $${anomaly.price}`);
+    _log.info('price_anomaly', { module: 'prices', level: anomaly.level, pair: anomaly.pair, direction, changePct: pctStr, price: anomaly.price });
+    metrics?.record('price_anomaly', Math.abs(anomaly.change) * 100, { pair: anomaly.pair, level: anomaly.level });
 
     // Trigger instant analysis via callback
     if (_anomalyHandler) {
@@ -120,7 +122,7 @@ export function createPriceStream({ db, config }) {
 
     ws.on('open', () => {
       wsConnected = true;
-      console.log('[OKX-WS] Connected');
+      _log.info('ws_connected', { module: 'prices', exchange: 'OKX' });
       // Subscribe to tickers
       ws.send(JSON.stringify({
         op: 'subscribe',
@@ -145,17 +147,19 @@ export function createPriceStream({ db, config }) {
             }
           }
         }
-      } catch (e) { console.error('[OKX-WS] Parse error:', e.message); }
+      } catch (e) { _log.error('ws_parse_error', { module: 'prices', error: e.message }); }
     });
 
     ws.on('close', () => {
       wsConnected = false;
-      console.log('[OKX-WS] Disconnected, reconnecting in 5s...');
+      _log.warn('ws_disconnected', { module: 'prices', exchange: 'OKX' });
+      metrics?.record('ws_disconnect', 1, { exchange: 'OKX' });
       wsReconnectTimer = setTimeout(connectOKXWebSocket, 5000);
     });
 
     ws.on('error', (err) => {
-      console.error('[OKX-WS] Error:', err.message);
+      _log.error('ws_error', { module: 'prices', exchange: 'OKX', error: err.message });
+      metrics?.record('ws_error', 1, { exchange: 'OKX' });
       ws.close();
     });
 

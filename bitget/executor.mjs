@@ -2,7 +2,8 @@
  * Bitget trade executor: mutex lock + order placement + trade sync.
  */
 
-export function createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer }) {
+export function createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer, log, metrics }) {
+  const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { bitgetRequest, roundPrice } = bitgetClient;
   const { postMessage } = messageBus;
   const { insertTrade, insertDecision, updateTradeClose,
@@ -25,8 +26,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
   };
 
   async function executeBitgetTrade(signal, traceId) {
-    if (!config.BITGET_API_KEY) { console.log('[BitgetExec] No API key, skip'); return; }
-    if (!tradingLock.acquire()) { console.log('[BitgetExec] Trading lock active, skip'); return; }
+    if (!config.BITGET_API_KEY) { _log.info('no_api_key', { module: 'bitget_exec' }); return; }
+    if (!tradingLock.acquire()) { _log.info('trading_lock_active', { module: 'bitget_exec' }); return; }
     try { await _executeBitgetTradeInner(signal, traceId); } finally { tradingLock.release(); }
   }
 
@@ -69,7 +70,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     const kelly = (p * b - q) / b;
 
     if (kelly <= 0) {
-      console.log(`[Kelly] Negative Kelly (${kelly.toFixed(3)}), using min size`);
+      _log.info('kelly_negative', { module: 'kelly', kelly: kelly.toFixed(3) });
       return minSize;
     }
 
@@ -78,14 +79,14 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
     // Convert USDT margin → notional → contract size (10x leverage)
     if (!currentPrice || currentPrice <= 0) {
-      console.warn(`[Kelly] No valid price for ${symbol}, skip trade`);
+      _log.warn('no_valid_price', { module: 'kelly', symbol });
       return 0; // caller must check for 0 and abort
     }
     const usdtMargin = fraction * available;
     const contractSize = (usdtMargin * 10) / currentPrice; // leverage=10
 
     const result = Math.max(minSize, parseFloat(contractSize.toFixed(4)));
-    console.log(`[Kelly] ${symbol} p=${p.toFixed(2)} b=${b.toFixed(2)} f=${kelly.toFixed(3)} half=${fraction.toFixed(3)} → size=${result} (avail=$${available.toFixed(2)}, price=$${currentPrice})`);
+    _log.info('kelly_calc', { module: 'kelly', symbol, p: p.toFixed(2), b: b.toFixed(2), f: kelly.toFixed(3), half: fraction.toFixed(3), size: result, available: available.toFixed(2), price: currentPrice });
     return result;
   }
 
@@ -96,7 +97,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
     // Trade on actionable signals (Risk Agent already approved)
     if (['hold', 'reduce_exposure'].includes(action)) {
-      console.log(`[BitgetExec] Action "${action}", skip`);
+      _log.info('action_skip', { module: 'bitget_exec', action });
       return;
     }
 
@@ -110,7 +111,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
     const rawSymbol = (signal.symbol || 'ETHUSDT').toUpperCase();
     const symbol = SUPPORTED_SYMBOLS.includes(rawSymbol) ? rawSymbol : 'ETHUSDT';
-    if (rawSymbol !== symbol) console.warn(`[BitgetExec] Unknown symbol "${signal.symbol}", fallback to ${symbol}`);
+    if (rawSymbol !== symbol) _log.warn('unknown_symbol', { module: 'bitget_exec', rawSymbol: signal.symbol, fallback: symbol });
     const leverage = '10';
 
     // Smart order type: confidence >= 80 → market, 60-80 → limit
@@ -124,7 +125,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         const positions = Array.isArray(posData) ? posData : (posData?.list || []);
         const sameDirection = positions.find(p => p.symbol === symbol && p.holdSide === holdSide && parseFloat(p.total || '0') > 0);
         if (sameDirection) {
-          console.log(`[BitgetExec] Already have ${holdSide} position on ${symbol}, skip`);
+          _log.info('position_exists', { module: 'bitget_exec', holdSide, symbol });
           return;
         }
       } catch {}
@@ -135,7 +136,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         const allPending = pendingData?.entrustedList || (Array.isArray(pendingData) ? pendingData : []);
         const pendingCount = allPending.filter(o => o.orderType !== 'plan').length;
         if (useLimit && pendingCount >= 2) {
-          console.log(`[BitgetExec] Already ${pendingCount} pending orders, skip limit order`);
+          _log.info('pending_orders_limit', { module: 'bitget_exec', pendingCount });
           return;
         }
       } catch {}
@@ -146,7 +147,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
 
       if (available < 0.5) {
-        console.log(`[BitgetExec] Insufficient balance: $${available.toFixed(2)}`);
+        _log.info('insufficient_balance', { module: 'bitget_exec', available: available.toFixed(2) });
         insertDecision.run(new Date().toISOString(), 'executor', 'skip', '', '',
           JSON.stringify({ reason: 'insufficient_balance', available }), 'Bitget trade skipped', '', '', confidence, null);
         return;
@@ -162,21 +163,21 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       if (!currentPrice) {
         const pairMap = { BTCUSDT: 'BTC-USDT', ETHUSDT: 'ETH-USDT', SOLUSDT: 'SOL-USDT' };
         if (!pairMap[symbol]) {
-          console.error(`[BitgetExec] No price mapping for ${symbol}, abort`);
+          _log.error('no_price_mapping', { module: 'bitget_exec', symbol });
           return;
         }
         const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get(pairMap[symbol]);
         currentPrice = candleRow?.close || 0;
       }
       if (!currentPrice) {
-        console.error(`[BitgetExec] Cannot get price for ${symbol}, abort trade`);
+        _log.error('price_unavailable', { module: 'bitget_exec', symbol });
         return;
       }
 
       // Dynamic Kelly position sizing (per-symbol)
       const kellySize = calculateKellySize(available, symbol, currentPrice);
       if (kellySize <= 0) {
-        console.log(`[BitgetExec] Kelly returned 0 for ${symbol}, abort`);
+        _log.info('kelly_zero', { module: 'bitget_exec', symbol });
         return;
       }
       const size = String(kellySize);
@@ -215,7 +216,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
           orderParams.presetStopSurplusPrice = String(await roundPrice(symbol, tp));
           orderParams.presetStopLossPrice = String(await roundPrice(symbol, sl));
         } else {
-          console.warn(`[BitgetExec] Invalid TP/SL direction for ${holdSide}: TP=${tp} SL=${sl} current=${currentPrice}, skip TP/SL`);
+          _log.warn('invalid_tp_sl_direction', { module: 'bitget_exec', holdSide, tp, sl, currentPrice });
         }
       }
 
@@ -224,7 +225,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       const orderId = order?.orderId;
       const priceInfo = useLimit ? `@ ${orderParams.price}` : '@ market';
-      console.log(`[BitgetExec] ${holdSide.toUpperCase()} ${size} ${symbol} ${leverage}x ${orderType} ${priceInfo} | conf:${confidence} | SL:${signal.stop_loss || '-'} TP:${signal.take_profit || '-'} | orderId: ${orderId}`);
+      _log.info('trade_opened', { module: 'bitget_exec', holdSide, size, symbol, leverage, orderType, priceInfo, confidence, sl: signal.stop_loss || '-', tp: signal.take_profit || '-', orderId });
+      metrics?.record('trade_execution', 1, { symbol, side, orderType });
 
       // Record trade
       insertTrade.run(
@@ -246,7 +248,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       }
 
     } catch (err) {
-      console.error(`[BitgetExec] Failed: ${err.message}`);
+      _log.error('trade_failed', { module: 'bitget_exec', error: err.message });
       insertDecision.run(new Date().toISOString(), 'executor', 'bitget_error', '', '',
         JSON.stringify({ error: err.message }), 'Bitget trade failed', err.message, '', 0, null);
     }
@@ -258,7 +260,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const fillPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
       if (fillPrice > 0) {
         db.prepare('UPDATE trades SET entry_price = ? WHERE trade_id = ?').run(fillPrice, tradeId);
-        console.log(`[TradeSync] Entry price: ${tradeId} @ $${fillPrice}`);
+        _log.info('entry_price_updated', { module: 'trade_sync', tradeId, fillPrice });
       }
     } catch { /* market order fill, non-critical */ }
   }
@@ -287,7 +289,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
             const orderDetail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${trade.pair}&productType=USDT-FUTURES&orderId=${trade.tx_hash}`);
             const orderStatus = orderDetail?.status || orderDetail?.state || '';
             if (['live', 'initial', 'new', 'partial_fill'].includes(orderStatus)) {
-              console.log(`[TradeSync] Pending limit order ${trade.trade_id} (${orderStatus}), skip`);
+              _log.info('pending_limit_order', { module: 'trade_sync', tradeId: trade.trade_id, orderStatus });
               continue;
             }
           } catch {}
@@ -352,22 +354,22 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
           updateTradeClose.run(exitPrice, pnl, pnlPct, new Date().toISOString(), trade.trade_id);
           const sign = pnl >= 0 ? '+' : '';
-          console.log(`[TradeSync] Closed ${trade.trade_id}: entry=$${entryPrice} exit=$${exitPrice} pnl=${sign}${pnl.toFixed(4)} USDT (${sign}${pnlPct.toFixed(2)}%)`);
+          _log.info('trade_closed', { module: 'trade_sync', tradeId: trade.trade_id, entryPrice, exitPrice, pnl: pnl.toFixed(4), pnlPct: pnlPct.toFixed(2) });
 
           // Trigger reviewer to generate lesson from this closed trade
           if (reviewer) {
             reviewer.runReview(`sync_close_${trade.trade_id}`).catch(err =>
-              console.error('[TradeSync] Reviewer trigger failed:', err.message)
+              _log.error('reviewer_trigger_failed', { module: 'trade_sync', error: err.message })
             );
           }
         } catch {
           // Can't find fill data — mark closed to avoid re-checking indefinitely
           updateTradeClose.run(0, 0, 0, new Date().toISOString(), trade.trade_id);
-          console.log(`[TradeSync] Marked closed (no fill data): ${trade.trade_id}`);
+          _log.info('trade_closed_no_fill', { module: 'trade_sync', tradeId: trade.trade_id });
         }
       }
     } catch (e) {
-      console.error('[TradeSync] Error:', e.message);
+      _log.error('sync_error', { module: 'trade_sync', error: e.message });
     }
   }
 
@@ -409,19 +411,19 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
   async function openScoutPosition(symbol, signal, traceId) {
     if (!config.BITGET_API_KEY) return null;
-    if (!tradingLock.acquire()) { console.log('[Scout] Trading lock active, skip'); return null; }
+    if (!tradingLock.acquire()) { _log.info('trading_lock_active', { module: 'scout' }); return null; }
 
     try {
       // Check abandon cooldown
       const lastAbandoned = getLastAbandonedTime(symbol);
       if (Date.now() - lastAbandoned < SCALING.abandon_cooldown_ms) {
-        console.log(`[Scout] ${symbol} in abandon cooldown, skip`);
+        _log.info('abandon_cooldown', { module: 'scout', symbol });
         return null;
       }
 
       // Check no existing active group for this symbol
       if (getActiveGroup(symbol)) {
-        console.log(`[Scout] ${symbol} already has active position group, skip`);
+        _log.info('active_group_exists', { module: 'scout', symbol });
         return null;
       }
 
@@ -436,7 +438,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const usdtBal = accounts?.find(a => a.marginCoin === 'USDT');
       const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
       if (available < 0.5) {
-        console.log(`[Scout] Insufficient balance: $${available.toFixed(2)}`);
+        _log.info('insufficient_balance', { module: 'scout', available: available.toFixed(2) });
         return null;
       }
 
@@ -445,7 +447,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
         const positions = Array.isArray(posData) ? posData : (posData?.list || []);
         if (positions.find(p => p.symbol === symbol && p.holdSide === holdSide && parseFloat(p.total || '0') > 0)) {
-          console.log(`[Scout] Already have ${holdSide} position on ${symbol}, skip`);
+          _log.info('position_exists', { module: 'scout', holdSide, symbol });
           return null;
         }
       } catch {}
@@ -471,7 +473,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const stopLoss = _calcStopLoss(holdSide, price, 0);
       const tp = signal.take_profit || null;
 
-      console.log(`[Scout] L0 ${holdSide.toUpperCase()} ${sizeStr} ${symbol} 10x | orderId: ${orderId} | SL: ${stopLoss}`);
+      _log.info('scout_opened', { module: 'scout', level: 0, holdSide, size: sizeStr, symbol, orderId, stopLoss });
+      metrics?.record('trade_execution', 1, { symbol, side, orderType: 'market' });
 
       // Record in trades table (backward compat)
       const tradeId = `bg_${orderId}`;
@@ -510,7 +513,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       return { groupId, level: 0, size: scoutSize, symbol, holdSide };
     } catch (err) {
-      console.error(`[Scout] Failed: ${err.message}`);
+      _log.error('scout_failed', { module: 'scout', error: err.message });
       insertDecision.run(new Date().toISOString(), 'executor', 'scout_error', '', '',
         JSON.stringify({ error: err.message }), 'Scout open failed', err.message, '', 0, null);
       return null;
@@ -553,7 +556,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
   }
 
   async function scaleUpPosition(group, signal, traceId) {
-    if (!tradingLock.acquire()) { console.log('[ScaleUp] Trading lock active, skip'); return null; }
+    if (!tradingLock.acquire()) { _log.info('trading_lock_active', { module: 'scale_up' }); return null; }
 
     try {
       const nextLevel = group.current_level + 1;
@@ -582,7 +585,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const newSL = _calcStopLoss(holdSide, newAvgEntry, nextLevel);
       const tp = group.take_profit; // keep existing TP
 
-      console.log(`[ScaleUp] L${nextLevel} ${holdSide.toUpperCase()} +${sizeStr} ${group.symbol} | total=${newTotalSize.toFixed(4)} | avgEntry=$${newAvgEntry.toFixed(2)} | SL=$${newSL}`);
+      _log.info('scale_up_opened', { module: 'scale_up', level: nextLevel, holdSide, size: sizeStr, symbol: group.symbol, totalSize: newTotalSize.toFixed(4), avgEntry: newAvgEntry.toFixed(2), stopLoss: newSL });
+      metrics?.record('trade_execution', 1, { symbol: group.symbol, side, orderType: 'market' });
 
       // Record in trades table
       const tradeId = `bg_${orderId}`;
@@ -622,7 +626,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       return { level: nextLevel, size, avgEntry: newAvgEntry };
     } catch (err) {
-      console.error(`[ScaleUp] Failed: ${err.message}`);
+      _log.error('scale_up_failed', { module: 'scale_up', error: err.message });
       return null;
     } finally {
       tradingLock.release();
@@ -654,7 +658,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
   }
 
   async function abandonPosition(group, traceId) {
-    if (!tradingLock.acquire()) { console.log('[Abandon] Trading lock active, skip'); return; }
+    if (!tradingLock.acquire()) { _log.info('trading_lock_active', { module: 'abandon' }); return; }
 
     try {
       const closeSide = group.side === 'long' ? 'sell' : 'buy';
@@ -684,7 +688,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         : 0;
 
       const sign = pnl >= 0 ? '+' : '';
-      console.log(`[Abandon] Closed ${holdSide} ${group.symbol} L${group.current_level} | size=${totalSize} | pnl=${sign}${pnl.toFixed(4)} (${sign}${pnlPct.toFixed(2)}%)`);
+      _log.info('position_abandoned', { module: 'abandon', holdSide, symbol: group.symbol, level: group.current_level, size: totalSize, pnl: pnl.toFixed(4), pnlPct: pnlPct.toFixed(2) });
 
       // Close the position group
       closePositionGroup.run('abandoned', pnl, pnlPct, group.id);
@@ -703,7 +707,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         JSON.stringify(order), `Abandon ${holdSide} ${group.symbol}`, '', `pnl=${sign}${pnl.toFixed(4)}`, 0, null);
 
     } catch (err) {
-      console.error(`[Abandon] Failed: ${err.message}`);
+      _log.error('abandon_failed', { module: 'abandon', error: err.message });
     } finally {
       tradingLock.release();
     }

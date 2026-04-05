@@ -4,7 +4,9 @@
 
 import { createHmac } from 'crypto';
 
-export function createBitgetClient(config) {
+export function createBitgetClient(config, { metrics, log } = {}) {
+  let _consecutiveFailures = 0;
+  let _lastError = null;
   function bitgetSign(ts, method, path, body = '') {
     const msg = ts + method + path + body;
     return createHmac('sha256', config.BITGET_SECRET).update(msg).digest('base64');
@@ -14,6 +16,7 @@ export function createBitgetClient(config) {
     const ts = String(Date.now());
     const bodyStr = body ? JSON.stringify(body) : '';
     const sig = bitgetSign(ts, method, path, bodyStr);
+    const start = Date.now();
     const res = await fetch(`${config.BITGET_BASE}${path}`, {
       method,
       headers: {
@@ -28,14 +31,29 @@ export function createBitgetClient(config) {
       signal: AbortSignal.timeout(10000),
     });
     const data = await res.json();
-    if (data.code !== '00000') throw new Error(`Bitget ${data.code}: ${data.msg}`);
+    const latency = Date.now() - start;
+    metrics?.record('bitget_api_latency_ms', latency, { method, path: path.split('?')[0] });
+    if (data.code !== '00000') {
+      metrics?.record('bitget_api_error', 1, { code: data.code, path: path.split('?')[0] });
+      _consecutiveFailures++;
+      _lastError = `${data.code}: ${data.msg}`;
+      if (_consecutiveFailures >= 3) {
+        log?.warn?.('bitget_consecutive_failures', { count: _consecutiveFailures, lastError: _lastError });
+      }
+      throw new Error(`Bitget ${data.code}: ${data.msg}`);
+    }
+    _consecutiveFailures = 0;
     return data.data;
   }
 
   async function bitgetPublic(path) {
+    const start = Date.now();
     const res = await fetch(`${config.BITGET_BASE}${path}`, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
+    const latency = Date.now() - start;
+    metrics?.record('bitget_api_latency_ms', latency, { method: 'GET', path: path.split('?')[0] });
     if (data.code && data.code !== '00000') throw new Error(`Bitget ${data.code}: ${data.msg}`);
+    _consecutiveFailures = 0;
     return data.data;
   }
 
