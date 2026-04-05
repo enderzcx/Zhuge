@@ -126,7 +126,7 @@ confirmHandler.setTgCall(agentBot.tgCall);
 
 // --- Push Engine (Phase 3) ---
 const tgSend = (text) => agentBot.sendMessage(config.TG_CHAT_ID, text);
-pushEngine = createSmartPush({ db, config, tgSend, log, metrics });
+pushEngine = createSmartPush({ db, config, tgSend, tgCall: agentBot.tgCall, log, metrics });
 _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
 
 // Create pipeline (after push engine)

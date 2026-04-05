@@ -16,7 +16,7 @@ import { createHash } from 'crypto';
 const DEDUP_WINDOW = 30 * 60 * 1000; // 30 min
 const MAX_CONTEXT_ITEMS = 20;        // max stored push contexts
 
-export function createPushEngine({ db, config, tgSend, log, metrics }) {
+export function createPushEngine({ db, config, tgSend, tgCall, log, metrics }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
 
@@ -129,13 +129,27 @@ export function createPushEngine({ db, config, tgSend, log, metrics }) {
       pushContexts.delete(oldest);
     }
 
-    // Send to TG
+    // Send to TG — route to appropriate topic
     try {
-      await tgSend(text);
+      const dashChat = config.TG_DASHBOARD_CHAT;
+      const topicMap = { FLASH: config.TG_TOPIC_NEWS, TRADE: config.TG_TOPIC_POSITIONS, ERROR: config.TG_TOPIC_OBSERVE };
+      const threadId = dashChat ? topicMap[level] : null;
+
+      if (dashChat && threadId && tgCall) {
+        await tgCall('sendMessage', {
+          chat_id: dashChat,
+          message_thread_id: Number(threadId),
+          text: text.slice(0, 4000),
+        });
+      } else {
+        await tgSend(text);
+      }
       _m.record('push_sent', 1, { level });
       _log.info('push_sent', { module: 'push', level, pushId });
     } catch (err) {
       _log.error('push_send_failed', { module: 'push', level, error: err.message });
+      // Fallback to DM
+      try { await tgSend(text); } catch {}
     }
 
     return pushId;

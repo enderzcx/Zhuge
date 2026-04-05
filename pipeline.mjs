@@ -376,7 +376,8 @@ ${summary}
     try { updateSourceScores(); } catch (e) { log.error('source_score_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'source_score' }); }
 
     // Check alert conditions
-    try { checkAlerts(); } catch (e) { log.error('alerts_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'alerts' }); }
+    // checkAlerts disabled — replaced by agent/push/engine.mjs (Phase 3)
+    // try { checkAlerts(); } catch (e) { log.error('alerts_error', { module: 'pipeline', error: e.message }); }
 
     // Momentum: discover + research + trade new/trending coins
     try { await scanner.runMomentumPipeline(); } catch (e) { log.error('momentum_error', { module: 'pipeline', error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'momentum' }); }
