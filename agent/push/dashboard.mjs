@@ -26,6 +26,7 @@ export function createDashboard({ config, db, tgCall, health, metrics, log }) {
     positions: config.TG_TOPIC_POSITIONS || null,
     observe: config.TG_TOPIC_OBSERVE || null,
     compound: config.TG_TOPIC_COMPOUND || null,
+    chart: config.TG_TOPIC_CHART || null,
   };
 
   async function _send(text, topicKey) {
@@ -238,7 +239,7 @@ export function createDashboard({ config, db, tgCall, health, metrics, log }) {
         chat_id: chatId,
         photo: chartUrl,
         caption: `📈 PnL Curve | Total: $${cumPnl.toFixed(2)} | ${trades.length} trades`,
-        ...(topics.positions ? { message_thread_id: topics.positions } : {}),
+        ...(topics.chart ? { message_thread_id: topics.chart } : topics.positions ? { message_thread_id: topics.positions } : {}),
       });
     } catch (err) {
       _log.error('post_chart_failed', { module: 'dashboard', error: err.message });
