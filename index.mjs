@@ -43,9 +43,10 @@ import { createConfirmHandler } from './agent/telegram/confirm.mjs';
 import { createAgentBot } from './agent/telegram/bot.mjs';
 import { createProvenance } from './agent/cognition/provenance.mjs';
 import { createCompound } from './agent/cognition/compound.mjs';
-// Push Engine (Phase 3) + Dashboard (Phase 4)
+// Push Engine (Phase 3) + Dashboard (Phase 4) + Primary Market (Phase 5)
 import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
 import { createDashboard } from './agent/push/dashboard.mjs';
+import { createPrimaryMarket } from './market/primary.mjs';
 // StockPulse Telegram Bot (deprecated, kept for backward compat if AGENT_BOT not configured)
 import { createLLMQueue } from './stockpulse/llm-queue.mjs';
 import { createPushEngine as createSPPushEngine } from './stockpulse/push-engine.mjs';
@@ -178,6 +179,9 @@ app.listen(config.PORT, () => {
     // Dashboard: scheduled TG posts (positions, observe, charts)
     const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log });
     dashboard.start();
+    // Primary Market: Base V3 pool listener (Phase 5)
+    const primaryMarket = createPrimaryMarket({ config, pushEngine, tgCall: agentBot.tgCall, log, metrics });
+    primaryMarket.start();
     // Check compound on startup, post result to dashboard
     if (agentCompound.shouldRun()) {
       agentCompound.run()

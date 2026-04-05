@@ -79,6 +79,9 @@ export function createConfig() {
   const TG_TOPIC_CHART = process.env.TG_TOPIC_CHART || '';
   const TG_TOPIC_NEWS = process.env.TG_TOPIC_NEWS || '';
 
+  // Primary Market (Base V3)
+  const BASE_WS_RPC = process.env.BASE_WS_RPC || ''; // wss://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+
   const PRICE_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
   const ANOMALY_THRESHOLD = 0.02;  // 2% in 5min → instant analysis
   const FLASH_THRESHOLD = 0.05;    // 5% in 5min → FLASH alert
@@ -129,5 +132,6 @@ export function createConfig() {
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
     SP_BOT_TOKEN, TG_BOT_TOKEN, TG_CHAT_ID,
     TG_DASHBOARD_CHAT, TG_TOPIC_POSITIONS, TG_TOPIC_OBSERVE, TG_TOPIC_COMPOUND, TG_TOPIC_CHART, TG_TOPIC_NEWS,
+    BASE_WS_RPC,
   };
 }
