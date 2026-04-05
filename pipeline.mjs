@@ -171,7 +171,7 @@ Output ONLY the JSON, no other text.`;
       try {
         insertDecision.run(now, 'analyst', 'analyze', '', '', JSON.stringify(parsed),
           `${mode} market analysis`, analystResult.content.slice(0, 500), '', parsed.confidence || 0, null);
-      } catch {}
+      } catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
 
       // Post analyst result to message bus
       bus.postMessage('analyst', 'risk', 'SIGNAL_UPDATE', parsed, traceId);
@@ -209,7 +209,7 @@ Output ONLY the JSON, no other text.`;
               try {
                 insertDecision.run(now, 'risk', 'veto', '', '', JSON.stringify(riskVerdict),
                   'Auto-trade blocked by Risk agent', riskVerdict.reason, '', 0, null);
-              } catch {}
+              } catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
             }
           }
         }
@@ -447,7 +447,7 @@ ${summary}
           try {
             insertDecision.run(now, 'risk', 'scout_veto', '', '', JSON.stringify(riskVerdict),
               `Scout blocked for ${symbol}`, riskVerdict.reason, '', confidence, null);
-          } catch {}
+          } catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
         }
       }
     }

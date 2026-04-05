@@ -117,7 +117,7 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
             fnName, JSON.stringify(args), typeof result === 'string' ? result : JSON.stringify(result),
             '', '', '', 0, opts.trade_id || null
           );
-        } catch {}
+        } catch (e) { _log.warn('decision_insert_failed', { module: 'runner', agent: agentName, error: e.message }); }
       }
     }
 

@@ -43,7 +43,7 @@ export function createPriceStream({ db, config, log, metrics }) {
     if (!candle || !candle.open) return;
     try {
       insertCandle.run(pair, candle.open, candle.high, candle.low, candle.close, candle.ts_start);
-    } catch {}
+    } catch (e) { _log.warn('candle_insert_failed', { module: 'prices', pair, error: e.message }); }
   }
 
   function updateCandle(pair, price, ts) {
