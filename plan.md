@@ -524,8 +524,8 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 ### pipeline.mjs
 - [x] 接入 observe/logger (替代 console.log)
 - [x] 接入 observe/metrics (agent 调用计时)
-- [ ] 接入 push/engine (分析后推送决策) — Phase 3
-- [ ] 推送时带完整 analysis + news URLs — Phase 3
+- [x] 接入 push/engine (分析后推送决策) — Phase 3
+- [x] 推送时带完整 analysis + news URLs — Phase 3
 
 ### db.mjs
 - [x] 新增 `metrics` 表 (在 metrics.mjs 中自建)
@@ -603,11 +603,10 @@ log.error('bitget_timeout', { endpoint: '/api/v2/mix/...', attempt: 3 });
 - [ ] "上笔为什么亏了" → provenance 回溯完整决策链
 
 ### Phase 3: Smart Push — 智能推送引擎
-- [ ] agent/push/engine.mjs — AI 推送决策
-- [ ] agent/push/log.mjs — push_log 上下文存储
-- [ ] pipeline.mjs 接入 push engine
-- [ ] 推送带原始 URL + 完整分析链路
-- [ ] TG 追问带上下文
+- [x] agent/push/engine.mjs — AI 推送决策 (FLASH/TRADE/ERROR + dedup + context)
+- [x] pipeline.mjs 接入 push engine (push_worthy → pushFlash)
+- [x] 推送带原始 URL + 完整分析链路
+- [x] TG 追问带上下文 (recent_pushes tool + prompt 注入最近推送)
 - [ ] 部署验证: 等待下一轮 FLASH 级新闻，确认推送 + 追问
 
 ### Phase 4: Dashboard — Web 看板
