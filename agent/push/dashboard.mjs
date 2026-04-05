@@ -341,26 +341,23 @@ ${numbered}
       const withUrl = feed.filter(n => n.url && (n.headline || n.title)).slice(0, 15);
       if (withUrl.length === 0) return;
 
-      // LLM filter: only keep market-relevant news
+      // LLM filter: only keep market-relevant news, cap at 5
       const relevant = await _filterForTrading(
         withUrl.map(n => ({ ...n, text: n.headline || n.title })),
         'news'
       );
       if (relevant.length === 0) return;
+      const top = relevant.slice(0, 5);
 
-      // Batch translate headlines
-      const headlines = relevant.map(n => n.headline || n.title).join('\n');
-      const translated = await _translate(headlines);
-      const translatedLines = translated.split('\n');
-
+      // Translate each headline individually for reliability
       const lines = ['📰 新闻摘要', ''];
-      relevant.forEach((n, i) => {
-        const flag = n.urgent ? '🔴' : '📄';
+      for (const n of top) {
+        const headline = n.headline || n.title || '';
+        const translated = await _translate(headline);
         const region = n.region ? ` [${n.region}]` : '';
-        const title = translatedLines[i] || n.headline || n.title;
-        lines.push(`${flag} ${title}${region}`);
+        lines.push(`📄 ${translated}${region}`);
         lines.push(`   ${n.source || ''} | ${n.url}`);
-      });
+      }
       lines.push(`\n🕐 ${new Date().toISOString().slice(11, 16)} UTC`);
 
       await _send(lines.join('\n'), 'news');
