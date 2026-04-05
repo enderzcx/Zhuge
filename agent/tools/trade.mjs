@@ -69,10 +69,8 @@ export function createTradeTools({ bitgetClient, bitgetExec, db, config }) {
   const EXECUTORS = {
     async positions() {
       try {
-        const res = await bitgetRequest('GET', '/api/v2/mix/position/all-position', {
-          productType: 'USDT-FUTURES',
-        });
-        const positions = res?.data || [];
+        const res = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+        const positions = Array.isArray(res) ? res : (res?.list || []);
         if (positions.length === 0) return '当前无持仓';
         return positions.map(p => {
           const pnl = parseFloat(p.unrealizedPL || 0);
@@ -87,10 +85,8 @@ export function createTradeTools({ bitgetClient, bitgetExec, db, config }) {
 
     async balance() {
       try {
-        const res = await bitgetRequest('GET', '/api/v2/mix/account/accounts', {
-          productType: 'USDT-FUTURES',
-        });
-        const accounts = res?.data || [];
+        const res = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
+        const accounts = Array.isArray(res) ? res : (res?.data || []);
         if (accounts.length === 0) return 'No account data';
         const a = accounts[0];
         return [
@@ -128,10 +124,9 @@ export function createTradeTools({ bitgetClient, bitgetExec, db, config }) {
       if (!symbol) return 'Error: symbol is required';
       try {
         // Find active position
-        const res = await bitgetRequest('GET', '/api/v2/mix/position/all-position', {
-          productType: 'USDT-FUTURES',
-        });
-        const pos = (res?.data || []).find(p =>
+        const res = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+        const positions = Array.isArray(res) ? res : (res?.list || []);
+        const pos = positions.find(p =>
           p.symbol?.includes(symbol.replace('USDT', ''))
         );
         if (!pos) return `没有找到 ${symbol} 的持仓`;
