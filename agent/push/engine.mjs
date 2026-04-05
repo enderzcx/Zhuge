@@ -51,28 +51,38 @@ export function createPushEngine({ db, config, tgSend, tgCall, log, metrics }) {
    */
   async function pushFlash({ analysis, news, traceId }) {
     const reason = analysis.push_reason || analysis.briefing || '';
-    const key = _dedupKey('FLASH', reason);
+    const key = _dedupKey('FLASH', reason.slice(0, 100));
     if (_isDuplicate(key)) return null;
 
     // Build message
     const alerts = (analysis.alerts || []).filter(a => a.level === 'FLASH' || a.level === 'PRIORITY');
-    const alertText = alerts.map(a => `• ${a.signal}`).join('\n');
-    const newsUrls = (news || [])
-      .filter(n => n.score >= 70 || n.signal !== 'neutral')
+    const alertLines = alerts.slice(0, 4).map(a => {
+      const src = a.source ? ` (${a.source})` : '';
+      return `• ${a.signal}${src}`;
+    });
+
+    // News with URLs — only items that have actual URLs and titles
+    const newsWithUrls = (news || [])
+      .filter(n => (n.title || n.headline) && (n.url || n.link))
       .slice(0, 3)
-      .map(n => `${n.signal === 'long' ? '📈' : n.signal === 'short' ? '📉' : '📰'} ${n.title}\n${n.url || ''}`)
-      .join('\n');
+      .map(n => {
+        const icon = n.signal === 'long' ? '📈' : n.signal === 'short' ? '📉' : '📰';
+        const title = (n.title || n.headline || '').slice(0, 80);
+        const url = n.url || n.link || '';
+        return `${icon} ${title}\n   ${url}`;
+      });
 
     const text = [
       `🚨 FLASH`,
       '',
       reason,
-      alertText ? `\n${alertText}` : '',
-      newsUrls ? `\n${newsUrls}` : '',
+      '',
+      alertLines.length ? alertLines.join('\n') : null,
+      newsWithUrls.length ? '\n' + newsWithUrls.join('\n') : null,
       '',
       `Risk:${analysis.macro_risk_score} Sentiment:${analysis.crypto_sentiment || analysis.stock_sentiment || '?'} Bias:${analysis.technical_bias}`,
-      `Confidence:${analysis.confidence} Action:${analysis.recommended_action}`,
-    ].filter(Boolean).join('\n');
+      `Conf:${analysis.confidence} Action:${analysis.recommended_action}`,
+    ].filter(v => v !== null).join('\n');
 
     return _send('FLASH', text, { analysis, news, traceId });
   }

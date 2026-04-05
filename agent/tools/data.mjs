@@ -48,6 +48,24 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       requiresConfirmation: false,
     },
     {
+      name: 'tg_urgent',
+      description: '实时地缘政治/战争快讯 (来自 Telegram 情报频道)',
+      parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'news_feed',
+      description: '全球新闻摘要 (50条, 含 headline + URL + 来源 + 地区)',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: '条数 (默认10)' },
+          region: { type: 'string', description: '按地区筛选 (可选)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
       name: 'recent_pushes',
       description: '最近的推送记录 (含完整分析上下文, 用于追问)',
       parameters: {
@@ -128,6 +146,37 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         return entry ? JSON.stringify(entry) : `No price data for ${symbol}`;
       }
       return JSON.stringify(priceCache);
+    },
+
+    async tg_urgent() {
+      try {
+        const crucix = await fetchCrucix();
+        const urgent = crucix?.tg?.urgent || [];
+        if (urgent.length === 0) return '当前无紧急快讯';
+        return urgent.slice(0, 10).map(u =>
+          `[${u.channel || '?'}] ${(u.text || '').slice(0, 200)}`
+        ).join('\n\n');
+      } catch (err) {
+        return `{ "error": "${err.message}" }`;
+      }
+    },
+
+    async news_feed({ limit, region } = {}) {
+      try {
+        const crucix = await fetchCrucix();
+        const feed = crucix?.newsFeed || [];
+        let items = feed.filter(n => n.headline || n.title);
+        if (region) items = items.filter(n => (n.region || '').toLowerCase().includes(region.toLowerCase()));
+        return JSON.stringify(items.slice(0, limit || 10).map(n => ({
+          headline: n.headline || n.title,
+          source: n.source,
+          region: n.region,
+          url: n.url || '',
+          urgent: n.urgent || false,
+        })));
+      } catch (err) {
+        return `{ "error": "${err.message}" }`;
+      }
     },
 
     async recent_pushes({ limit } = {}) {

@@ -115,7 +115,11 @@ toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...t
 const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
 toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS });
 
-const promptLoader = createPromptLoader({ db: db.db, pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] } });
+const promptLoader = createPromptLoader({
+  db: db.db,
+  pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
+  dataSources,
+});
 const confirmHandler = createConfirmHandler({ tgCall: null, executor: toolExecutor, history: agentHistory, log }); // tgCall set after bot creation
 const agentBot = createAgentBot({
   config, agentLLM, history: agentHistory, executor: toolExecutor,
@@ -177,7 +181,7 @@ app.listen(config.PORT, () => {
     agentBot.startPolling();
     log.info('agent_bot_started', { module: 'index' });
     // Dashboard: scheduled TG posts (positions, observe, charts)
-    const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log });
+    const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log, dataSources });
     dashboard.start();
     // Primary Market: Base V3 pool listener (Phase 5)
     const primaryMarket = createPrimaryMarket({ config, pushEngine, tgCall: agentBot.tgCall, log, metrics });

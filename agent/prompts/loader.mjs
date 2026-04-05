@@ -11,7 +11,7 @@ import { join } from 'path';
 const PROMPTS_DIR = 'agent/prompts';
 const MEMORY_DIR = 'agent/memory';
 
-export function createPromptLoader({ db, pushEngine }) {
+export function createPromptLoader({ db, pushEngine, dataSources }) {
   // Cache static prompts (read once)
   let _staticCache = null;
 
@@ -59,6 +59,34 @@ export function createPromptLoader({ db, pushEngine }) {
   }
 
   /**
+   * Load Crucix delta + TG urgent into prompt (what changed + breaking alerts).
+   */
+  async function _loadLiveContext() {
+    if (!dataSources) return '';
+    try {
+      const crucix = await dataSources.fetchCrucix();
+      if (!crucix) return '';
+      const parts = [];
+
+      // Delta — what changed most since last check
+      const delta = crucix.delta;
+      if (delta?.signals?.new?.length > 0) {
+        const signals = delta.signals.new.slice(0, 3).map(s => `- ${s.text?.slice(0, 100) || s.key}`);
+        parts.push(`## 最新变化 (delta)\n${signals.join('\n')}`);
+      }
+
+      // TG urgent — breaking geopolitical alerts
+      const urgent = crucix.tg?.urgent;
+      if (urgent?.length > 0) {
+        const alerts = urgent.slice(0, 3).map(u => `- [${u.channel}] ${u.text?.slice(0, 100)}`);
+        parts.push(`## 实时快讯 (TG urgent)\n${alerts.join('\n')}`);
+      }
+
+      return parts.length > 0 ? '\n\n' + parts.join('\n\n') : '';
+    } catch { return ''; }
+  }
+
+  /**
    * Load recent push context (so agent can answer follow-ups).
    */
   function _loadPushContext() {
@@ -89,10 +117,12 @@ export function createPromptLoader({ db, pushEngine }) {
    * Build full system prompt.
    */
   async function buildSystemPrompt() {
+    const liveCtx = await _loadLiveContext();
     const parts = [
       _loadStatic(),
       _loadDirectives(),
       _loadCompoundRules(),
+      liveCtx,
       _loadPushContext(),
       _loadContext(),
     ];

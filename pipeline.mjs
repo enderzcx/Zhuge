@@ -151,11 +151,18 @@ Output ONLY the JSON, no other text.`;
 
       // Smart Push: if analyst says push_worthy, send to owner via TG
       if (parsed.push_worthy && pushEngine) {
-        const newsForPush = Array.isArray(news) ? news.slice(0, 5).map(n => ({
-          title: n.title || n.headline, url: n.url || n.link || '',
-          score: n.score || 0, signal: n.signal || 'neutral',
-        })) : [];
-        pushEngine.pushFlash({ analysis: parsed, news: newsForPush, traceId })
+        // Merge OpenNews + Crucix newsFeed for better URL coverage
+        const openNewsItems = Array.isArray(news) ? news : [];
+        const crucixFeed = Array.isArray(crucix?.newsFeed) ? crucix.newsFeed : [];
+        const allNews = [...openNewsItems, ...crucixFeed]
+          .filter(n => (n.title || n.headline) && (n.url || n.link))
+          .slice(0, 5)
+          .map(n => ({
+            title: n.title || n.headline, url: n.url || n.link || '',
+            score: n.score || 0, signal: n.signal || 'neutral',
+            source: n.source || '',
+          }));
+        pushEngine.pushFlash({ analysis: parsed, news: allNews, traceId })
           .catch(err => log.error('push_flash_error', { module: 'pipeline', error: err.message }));
       }
 

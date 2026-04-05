@@ -15,7 +15,7 @@ const POSITIONS_INTERVAL = 5 * 60 * 1000;  // 5 min
 const OBSERVE_INTERVAL = 30 * 60 * 1000;    // 30 min
 const CHART_INTERVAL = 6 * 60 * 60 * 1000;  // 6 h
 
-export function createDashboard({ config, db, tgCall, health, metrics, log }) {
+export function createDashboard({ config, db, tgCall, health, metrics, log, dataSources }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const chatId = config.TG_DASHBOARD_CHAT || config.TG_CHAT_ID;
   const timers = [];
@@ -246,6 +246,70 @@ export function createDashboard({ config, db, tgCall, health, metrics, log }) {
     }
   }
 
+  // === TG Urgent — Real-time geopolitical alerts ===
+
+  const URGENT_INTERVAL = 2 * 60 * 1000; // check every 2min
+  const seenUrgentHashes = new Set();
+
+  async function checkTgUrgent() {
+    if (!dataSources) return;
+    try {
+      const crucix = await dataSources.fetchCrucix();
+      const urgent = crucix?.tg?.urgent || [];
+      if (urgent.length === 0) return;
+
+      for (const item of urgent) {
+        const hash = (item.channel || '') + ':' + (item.text || '').slice(0, 50);
+        if (seenUrgentHashes.has(hash)) continue;
+        seenUrgentHashes.add(hash);
+
+        // Keep set bounded
+        if (seenUrgentHashes.size > 200) {
+          const arr = [...seenUrgentHashes];
+          arr.slice(0, 100).forEach(h => seenUrgentHashes.delete(h));
+        }
+
+        const text = `⚡ TG URGENT [${item.channel || '?'}]\n\n${(item.text || '').slice(0, 800)}`;
+        await _send(text, 'news');
+      }
+    } catch (err) {
+      _log.error('tg_urgent_check_failed', { module: 'dashboard', error: err.message });
+    }
+  }
+
+  // === News Digest — top headlines with URLs ===
+
+  const NEWS_DIGEST_INTERVAL = 60 * 60 * 1000; // every 1h
+
+  async function postNewsDigest() {
+    if (!dataSources) return;
+    try {
+      const crucix = await dataSources.fetchCrucix();
+      const feed = crucix?.newsFeed || [];
+      if (feed.length === 0) return;
+
+      // Filter: recent, with url, relevant
+      const relevant = feed
+        .filter(n => n.url && (n.headline || n.title))
+        .slice(0, 8);
+
+      if (relevant.length === 0) return;
+
+      const lines = ['📰 News Digest', ''];
+      relevant.forEach((n, i) => {
+        const flag = n.urgent ? '🔴' : '📄';
+        const region = n.region ? ` [${n.region}]` : '';
+        lines.push(`${flag} ${n.headline || n.title}${region}`);
+        lines.push(`   ${n.source || ''} | ${n.url}`);
+      });
+      lines.push(`\n🕐 ${new Date().toISOString().slice(11, 16)} UTC`);
+
+      await _send(lines.join('\n'), 'news');
+    } catch (err) {
+      _log.error('news_digest_failed', { module: 'dashboard', error: err.message });
+    }
+  }
+
   // === Lifecycle ===
 
   function start() {
@@ -253,10 +317,14 @@ export function createDashboard({ config, db, tgCall, health, metrics, log }) {
     setTimeout(postPositions, 10000);
     setTimeout(postObserve, 15000);
     setTimeout(postPnLChart, 20000);
+    setTimeout(checkTgUrgent, 5000);  // urgent check starts fast
+    setTimeout(postNewsDigest, 30000);
 
     timers.push(setInterval(postPositions, POSITIONS_INTERVAL));
     timers.push(setInterval(postObserve, OBSERVE_INTERVAL));
     timers.push(setInterval(postPnLChart, CHART_INTERVAL));
+    timers.push(setInterval(checkTgUrgent, URGENT_INTERVAL));
+    timers.push(setInterval(postNewsDigest, NEWS_DIGEST_INTERVAL));
 
     _log.info('dashboard_started', { module: 'dashboard', chatId });
   }
@@ -266,5 +334,5 @@ export function createDashboard({ config, db, tgCall, health, metrics, log }) {
     timers.length = 0;
   }
 
-  return { start, stop, postPositions, postObserve, postCompound, postPnLChart };
+  return { start, stop, postPositions, postObserve, postCompound, postPnLChart, checkTgUrgent, postNewsDigest };
 }
