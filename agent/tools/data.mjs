@@ -3,7 +3,7 @@
  *   crucix_data, fetch_news, market_scan, price, agent_decisions
  */
 
-export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine }) {
+export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { priceCache } = priceStream;
 
@@ -63,6 +63,12 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           region: { type: 'string', description: '按地区筛选 (可选)' },
         },
       },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'run_compound',
+      description: '触发 AI 自主复盘 — 分析所有历史交易，发现 pattern，更新/新增/废弃交易规则。你觉得需要复盘时就调用（比如连续亏损、策略疑问、用户要求等）',
+      parameters: { type: 'object', properties: {}, required: [] },
       requiresConfirmation: false,
     },
     {
@@ -174,6 +180,23 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           url: n.url || '',
           urgent: n.urgent || false,
         })));
+      } catch (err) {
+        return `{ "error": "${err.message}" }`;
+      }
+    },
+
+    async run_compound() {
+      if (!compound) return '{ "error": "compound module not available" }';
+      try {
+        const result = await compound.run();
+        if (!result) return '没有足够的新交易数据需要复盘';
+        return JSON.stringify({
+          trades_reviewed: result.trades,
+          rules_generated: result.generated,
+          rules_updated: result.updated,
+          rules_deprecated: result.deprecated,
+          summary: result.summary || 'done',
+        });
       } catch (err) {
         return `{ "error": "${err.message}" }`;
       }

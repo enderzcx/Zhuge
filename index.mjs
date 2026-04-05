@@ -107,7 +107,11 @@ const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenan
 const systemTools = createSystemTools({ log });
 // pushEngine is null here, will be set after bot creation. Use getter pattern.
 const _pushRef = { engine: null };
-const dataTools = createDataTools({ dataSources, priceStream, db: db.db, scanner, pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] } });
+const dataTools = createDataTools({
+  dataSources, priceStream, db: db.db, scanner,
+  pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
+  compound: agentCompound,
+});
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log });
 toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS]);

@@ -12,7 +12,7 @@
  */
 
 const POSITIONS_INTERVAL = 5 * 60 * 1000;  // 5 min
-const OBSERVE_INTERVAL = 30 * 60 * 1000;    // 30 min
+const OBSERVE_INTERVAL = 2 * 60 * 60 * 1000; // 2h
 const CHART_INTERVAL = 6 * 60 * 60 * 1000;  // 6 h
 
 export function createDashboard({ config, db, tgCall, health, metrics, log, dataSources, llm }) {
