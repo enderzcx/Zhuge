@@ -129,7 +129,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
           _log.info('position_exists', { module: 'bitget_exec', holdSide, symbol });
           return;
         }
-      } catch {}
+      } catch (e) { _log.warn('position_check_failed', { module: 'bitget_exec', error: e.message }); }
 
       // Check pending orders — max 2
       try {
@@ -140,7 +140,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
           _log.info('pending_orders_limit', { module: 'bitget_exec', pendingCount });
           return;
         }
-      } catch {}
+      } catch (e) { _log.warn('pending_orders_check_failed', { module: 'bitget_exec', error: e.message }); }
 
       // Check balance
       const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
@@ -160,7 +160,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         const ticker = await bitgetRequest('GET', `/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`);
         const t = Array.isArray(ticker) ? ticker[0] : ticker;
         currentPrice = parseFloat(t?.lastPr || '0');
-      } catch {}
+      } catch (e) { _log.warn('ticker_fetch_failed', { module: 'bitget_exec', error: e.message }); }
       if (!currentPrice) {
         const pairMap = { BTCUSDT: 'BTC-USDT', ETHUSDT: 'ETH-USDT', SOLUSDT: 'SOL-USDT' };
         if (!pairMap[symbol]) {
@@ -263,7 +263,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         db.prepare('UPDATE trades SET entry_price = ? WHERE trade_id = ?').run(fillPrice, tradeId);
         _log.info('entry_price_updated', { module: 'trade_sync', tradeId, fillPrice });
       }
-    } catch { /* market order fill, non-critical */ }
+    } catch (e) { _log.warn('fill_price_fetch_failed', { module: 'trade_sync', error: e.message }); }
   }
 
   // Detect closed positions and update trades table with exit price + PnL.
@@ -293,7 +293,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
               _log.info('pending_limit_order', { module: 'trade_sync', tradeId: trade.trade_id, orderStatus });
               continue;
             }
-          } catch {}
+          } catch (e) { _log.warn('order_status_check_failed', { module: 'trade_sync', error: e.message }); }
         }
 
         // Position no longer exists — closed (TP/SL hit or manual)
@@ -317,7 +317,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
             try {
               const detail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${trade.pair}&productType=USDT-FUTURES&orderId=${closeOrder.orderId}`);
               exitPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
-            } catch {}
+            } catch (e) { _log.warn('close_order_detail_failed', { module: 'trade_sync', error: e.message }); }
           }
 
           // Final fallback: use latest candle close as estimate
@@ -325,7 +325,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
             try {
               const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get(trade.pair);
               if (candleRow?.close) exitPrice = parseFloat(candleRow.close);
-            } catch {}
+            } catch (e) { _log.warn('candle_fallback_failed', { module: 'trade_sync', error: e.message }); }
           }
 
           let entryPrice = trade.entry_price || 0;
@@ -339,7 +339,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
               if (entryPrice > 0) {
                 db.prepare('UPDATE trades SET entry_price = ? WHERE trade_id = ?').run(entryPrice, trade.trade_id);
               }
-            } catch {}
+            } catch (e) { _log.warn('entry_price_refetch_failed', { module: 'trade_sync', error: e.message }); }
           }
 
           let pnl = 0, pnlPct = 0;
@@ -363,7 +363,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
               _log.error('reviewer_trigger_failed', { module: 'trade_sync', error: err.message })
             );
           }
-        } catch {
+        } catch (e) {
+          _log.warn('trade_history_fetch_failed', { module: 'trade_sync', error: e.message });
           // Can't find fill data — mark closed to avoid re-checking indefinitely
           updateTradeClose.run(0, 0, 0, new Date().toISOString(), trade.trade_id);
           _log.info('trade_closed_no_fill', { module: 'trade_sync', tradeId: trade.trade_id });
@@ -451,7 +452,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
           _log.info('position_exists', { module: 'scout', holdSide, symbol });
           return null;
         }
-      } catch {}
+      } catch (e) { _log.warn('position_check_failed', { module: 'scout', error: e.message }); }
 
       // Calculate sizes
       const maxKelly = _calcMaxKellySize(available, symbol);
@@ -508,7 +509,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
               updatePositionGroup.run(0, fillPrice, scoutSize, newSL, tp, groupId);
               db.prepare('UPDATE position_levels SET entry_price = ? WHERE group_id = ? AND level = 0').run(fillPrice, groupId);
             }
-          } catch {}
+          } catch (e) { _log.warn('scout_fill_update_failed', { module: 'scout', error: e.message }); }
         }, 3000);
       }
 
@@ -621,7 +622,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
               updatePositionGroup.run(nextLevel, correctedAvg, newTotalSize, correctedSL, tp, group.id);
               db.prepare('UPDATE position_levels SET entry_price = ? WHERE group_id = ? AND level = ?').run(fillPrice, group.id, nextLevel);
             }
-          } catch {}
+          } catch (e) { _log.warn('scaleup_fill_update_failed', { module: 'scale_up', error: e.message }); }
         }, 3000);
       }
 
@@ -672,7 +673,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         const positions = Array.isArray(posData) ? posData : (posData?.list || []);
         const pos = positions.find(p => p.symbol === group.symbol && p.holdSide === holdSide);
         if (pos && parseFloat(pos.total || '0') > 0) closeSize = parseFloat(pos.total);
-      } catch {}
+      } catch (e) { _log.warn('abandon_position_size_failed', { module: 'abandon', error: e.message }); }
       const totalSize = String(closeSize);
 
       // Close entire position with one market order
