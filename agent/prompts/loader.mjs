@@ -36,7 +36,7 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
       const content = readFileSync(p, 'utf-8').trim();
       if (!content) return { directives: '', isEmpty: true };
       // Strip headings + template placeholder, check if anything real remains
-      const stripped = content.replace(/^#.*$/gm, '').replace(/^[-*] *待用户设定\s*$/gm, '').trim();
+      const stripped = content.replace(/^#.*$/gm, '').replace(/^.*待用户设定.*$/gm, '').trim();
       const hasEntries = stripped.length > 0;
       return {
         directives: hasEntries ? `\n\n## 老板指令 (最高优先级)\n${content}` : '',
