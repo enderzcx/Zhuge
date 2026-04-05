@@ -76,7 +76,7 @@ export function createBitgetClient(config, { metrics, log } = {}) {
         _symbolInfoExpiry = Date.now() + 60 * 60 * 1000; // cache 1h
       }
     } catch (e) {
-      console.error('[SymbolInfo] Failed to load:', e.message);
+      log?.error?.('symbol_info_load_failed', { module: 'bitget_client', error: e.message });
     }
   }
 

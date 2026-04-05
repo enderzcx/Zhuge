@@ -238,6 +238,70 @@ export function createDB() {
       pushed_at TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_push_ts ON push_history(pushed_at);
+
+    -- Metrics: time-series observability (agent/observe/metrics.mjs)
+    CREATE TABLE IF NOT EXISTS metrics (
+      ts INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      value REAL NOT NULL,
+      tags TEXT DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_metrics_name_ts ON metrics(name, ts);
+
+    -- Decision provenance: full trade context snapshot (agent/cognition/provenance.mjs)
+    CREATE TABLE IF NOT EXISTS decision_provenance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trade_id TEXT NOT NULL,
+      trace_id TEXT,
+      symbol TEXT,
+      side TEXT,
+      leverage INTEGER,
+      entry_price REAL,
+      momentum_score INTEGER,
+      funding_rate REAL,
+      volume_24h REAL,
+      volume_ratio REAL,
+      price_action_json TEXT,
+      hour_utc INTEGER,
+      researcher_reasoning TEXT,
+      risk_verdict TEXT,
+      active_rules_json TEXT,
+      exit_price REAL,
+      pnl REAL,
+      pnl_pct REAL,
+      hold_duration_min INTEGER,
+      max_drawdown_pct REAL,
+      created_at TEXT DEFAULT (datetime('now')),
+      closed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_prov_trade ON decision_provenance(trade_id);
+    CREATE INDEX IF NOT EXISTS idx_prov_symbol ON decision_provenance(symbol, created_at);
+
+    -- Compound rules: AI-discovered trading patterns (agent/cognition/compound.mjs)
+    CREATE TABLE IF NOT EXISTS compound_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id TEXT UNIQUE,
+      description TEXT NOT NULL,
+      action TEXT,
+      evidence_trade_ids TEXT,
+      trade_count INTEGER,
+      confidence REAL DEFAULT 0,
+      status TEXT DEFAULT 'active',
+      param_changes_json TEXT DEFAULT '{}',
+      source_compound_id INTEGER,
+      discovered_at TEXT DEFAULT (datetime('now')),
+      superseded_at TEXT,
+      superseded_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS compound_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trades_reviewed INTEGER,
+      rules_generated INTEGER,
+      rules_updated INTEGER,
+      rules_deprecated INTEGER,
+      llm_reasoning TEXT,
+      run_at TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   const insertNews = db.prepare(`

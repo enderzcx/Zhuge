@@ -8,7 +8,7 @@ const PRUNE_INTERVAL = 60 * 60 * 1000; // 1h
 const RETENTION_DAYS = 7;
 
 export function createMetrics(db) {
-  // Schema
+  // Schema (canonical definition in db.mjs, kept here for standalone usage)
   db.exec(`
     CREATE TABLE IF NOT EXISTS metrics (
       ts INTEGER NOT NULL,

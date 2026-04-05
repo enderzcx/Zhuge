@@ -55,7 +55,7 @@ export function createSignalScoring({ db }) {
       } catch {}
     }
 
-    if (scored > 0) console.log(`[SignalScore] Scored ${scored} historical signals`);
+    // Signal scoring result logged in pipeline via log.info
 
     // Expire old lessons
     try {

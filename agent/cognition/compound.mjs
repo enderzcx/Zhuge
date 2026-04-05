@@ -15,7 +15,7 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
 
-  // Ensure tables exist
+  // Ensure tables exist (canonical definition in db.mjs, kept here for standalone usage)
   db.exec(`
     CREATE TABLE IF NOT EXISTS compound_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

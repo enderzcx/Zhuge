@@ -11,7 +11,7 @@
 export function createProvenance({ db, log }) {
   const _log = log || { info() {}, warn() {}, error() {} };
 
-  // Ensure tables exist
+  // Ensure tables exist (canonical definition in db.mjs, kept here for standalone usage)
   db.exec(`
     CREATE TABLE IF NOT EXISTS decision_provenance (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -3,8 +3,8 @@
  * Extracted from vps-api-index.mjs lines ~2924-2999.
  */
 
-export function registerBitgetRoutes(app, { bitgetClient }) {
-
+export function registerBitgetRoutes(app, { bitgetClient, log }) {
+  const _log = log || { info: console.log, error: console.error };
   const { bitgetRequest, bitgetPublic } = bitgetClient;
 
   app.get('/api/bitget/balance', async (req, res) => {
@@ -40,10 +40,10 @@ export function registerBitgetRoutes(app, { bitgetClient }) {
         symbol, side, orderType: orderType || 'market', force: 'gtc',
         ...(orderType === 'limit' ? { price: String(price), size: String(amount) } : { size: String(amount) }),
       });
-      console.log(`[Bitget] Spot ${side} ${amount} ${symbol}: orderId=${order?.orderId}`);
+      _log.info('spot_order', { module: 'bitget_routes', side, amount, symbol, orderId: order?.orderId });
       res.json({ success: true, orderId: order?.orderId, symbol, side, amount });
     } catch (e) {
-      console.error(`[Bitget] Spot order failed:`, e.message);
+      _log.error('spot_order_failed', { module: 'bitget_routes', error: e.message });
       res.status(500).json({ error: e.message });
     }
   });
@@ -66,10 +66,10 @@ export function registerBitgetRoutes(app, { bitgetClient }) {
         orderType: orderType || 'market', size: String(amount),
         ...(orderType === 'limit' ? { price: String(price) } : {}),
       });
-      console.log(`[Bitget] Futures ${side} ${amount} ${symbol}: orderId=${order?.orderId}`);
+      _log.info('futures_order', { module: 'bitget_routes', side, amount, symbol, orderId: order?.orderId });
       res.json({ success: true, orderId: order?.orderId, symbol, side, amount });
     } catch (e) {
-      console.error(`[Bitget] Futures order failed:`, e.message);
+      _log.error('futures_order_failed', { module: 'bitget_routes', error: e.message });
       res.status(500).json({ error: e.message });
     }
   });

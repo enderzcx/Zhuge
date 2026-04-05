@@ -47,11 +47,7 @@ import { createCompound } from './agent/cognition/compound.mjs';
 import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
 import { createDashboard } from './agent/push/dashboard.mjs';
 import { createPrimaryMarket } from './market/primary.mjs';
-// StockPulse Telegram Bot (deprecated, kept for backward compat if AGENT_BOT not configured)
-import { createLLMQueue } from './stockpulse/llm-queue.mjs';
-import { createPushEngine as createSPPushEngine } from './stockpulse/push-engine.mjs';
-import { createAIAnalyst } from './stockpulse/ai-analyst.mjs';
-import { createStockPulseBot } from './stockpulse/telegram-bot.mjs';
+// StockPulse Telegram Bot (deprecated — dynamically imported only when AGENT_BOT not configured)
 // Route registrars
 import { registerAnalysisRoutes } from './routes/analysis.mjs';
 import { registerTradeRoutes } from './routes/trades.mjs';
@@ -146,14 +142,20 @@ _alertRef.fn = (msg) => pushEngine.pushError('health', msg); // wire health aler
 // Create pipeline (after push engine)
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine });
 
-// --- StockPulse Telegram Bot (deprecated — only inits if agent bot token not set) ---
+// --- StockPulse Telegram Bot (deprecated — lazy loaded only when agent bot not configured) ---
 let spBot = null;
 if (!config.TG_BOT_TOKEN) {
-  const eventBus = { emit() {} };
-  const llmQueue = createLLMQueue({ llm, eventBus });
-  const spPushEngine = createSPPushEngine({ db, config });
-  const aiAnalyst = createAIAnalyst({ llmQueue, db, config });
-  spBot = createStockPulseBot({ config, pushEngine: spPushEngine, aiAnalyst, dataSources });
+  try {
+    const { createLLMQueue } = await import('./stockpulse/llm-queue.mjs');
+    const { createPushEngine: createSPPushEngine } = await import('./stockpulse/push-engine.mjs');
+    const { createAIAnalyst } = await import('./stockpulse/ai-analyst.mjs');
+    const { createStockPulseBot } = await import('./stockpulse/telegram-bot.mjs');
+    const eventBus = { emit() {} };
+    const llmQueue = createLLMQueue({ llm, eventBus });
+    const spPushEngine = createSPPushEngine({ db, config });
+    const aiAnalyst = createAIAnalyst({ llmQueue, db, config });
+    spBot = createStockPulseBot({ config, pushEngine: spPushEngine, aiAnalyst, dataSources });
+  } catch (e) { log.warn('stockpulse_load_failed', { module: 'index', error: e.message }); }
 }
 
 // --- Register routes ---
@@ -164,7 +166,7 @@ registerHistoryRoutes(app, { db });
 registerStrategyRoutes(app, { db });
 registerLearningRoutes(app, { db, signals });
 registerMarketRoutes(app, { db, priceStream });
-registerBitgetRoutes(app, { bitgetClient });
+registerBitgetRoutes(app, { bitgetClient, log });
 registerLiFiRoutes(app, lifi);
 
 // --- Anomaly handler (price spike -> instant analysis) ---
