@@ -7,8 +7,14 @@
 
 const CONFIRM_TIMEOUT = 60000; // 1 min to confirm
 
-export function createConfirmHandler({ tgCall, executor, history, log }) {
+export function createConfirmHandler({ tgCall: _initTgCall, executor, history, log }) {
   const _log = log || { info() {}, warn() {}, error() {} };
+  let tgCall = _initTgCall;
+
+  /**
+   * Set tgCall after construction (resolves circular dep with bot.mjs).
+   */
+  function setTgCall(fn) { tgCall = fn; }
 
   // Pending confirmations: callbackId → { chatId, toolCallId, name, args, resolve, timer }
   const pending = new Map();
@@ -133,5 +139,5 @@ export function createConfirmHandler({ tgCall, executor, history, log }) {
     return data?.startsWith('confirm_');
   }
 
-  return { requestConfirm, handleCallback, isOurCallback };
+  return { requestConfirm, handleCallback, isOurCallback, setTgCall };
 }

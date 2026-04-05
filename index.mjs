@@ -28,7 +28,22 @@ import { createPipeline } from './pipeline.mjs';
 import { createMetrics } from './agent/observe/metrics.mjs';
 import { createLogger } from './agent/observe/logger.mjs';
 import { createHealthMonitor } from './agent/observe/health.mjs';
-// StockPulse Telegram Bot
+// Agent Harness — TG Agent
+import { createAgentLLM } from './agent/llm.mjs';
+import { createHistory } from './agent/history.mjs';
+import { createModelSelector } from './agent/model-select.mjs';
+import { createToolRegistry } from './agent/tools/registry.mjs';
+import { createToolExecutor } from './agent/tools/executor.mjs';
+import { createSystemTools } from './agent/tools/system.mjs';
+import { createDataTools } from './agent/tools/data.mjs';
+import { createTradeTools } from './agent/tools/trade.mjs';
+import { createMemoryTools } from './agent/tools/memory.mjs';
+import { createPromptLoader } from './agent/prompts/loader.mjs';
+import { createConfirmHandler } from './agent/telegram/confirm.mjs';
+import { createAgentBot } from './agent/telegram/bot.mjs';
+import { createProvenance } from './agent/cognition/provenance.mjs';
+import { createCompound } from './agent/cognition/compound.mjs';
+// StockPulse Telegram Bot (deprecated, kept for backward compat if AGENT_BOT not configured)
 import { createLLMQueue } from './stockpulse/llm-queue.mjs';
 import { createPushEngine } from './stockpulse/push-engine.mjs';
 import { createAIAnalyst } from './stockpulse/ai-analyst.mjs';
@@ -75,8 +90,36 @@ const researcher = createResearcher({ db, config, bitgetClient, agentRunner, ind
 const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher });
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log });
 
-// --- StockPulse Telegram Bot ---
-const eventBus = { emit() {} }; // lightweight stub, full eventBus not needed for bot
+// --- Agent Harness (Phase 2) ---
+const agentLLM = createAgentLLM(config, { log, metrics });
+const agentHistory = createHistory({ llm });
+const modelSelector = createModelSelector(config);
+const toolRegistry = createToolRegistry();
+const agentProvenance = createProvenance({ db: db.db, log });
+const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenance, log, metrics });
+
+// Register tools
+const systemTools = createSystemTools({ log });
+const dataTools = createDataTools({ dataSources, priceStream, db: db.db, scanner });
+const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
+const memoryTools = createMemoryTools({ log });
+toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS]);
+
+const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
+toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS });
+
+const promptLoader = createPromptLoader({ db: db.db });
+const confirmHandler = createConfirmHandler({ tgCall: null, executor: toolExecutor, history: agentHistory, log }); // tgCall set after bot creation
+const agentBot = createAgentBot({
+  config, agentLLM, history: agentHistory, executor: toolExecutor,
+  modelSelector, buildSystemPrompt: promptLoader.buildSystemPrompt,
+  confirmHandler, log, metrics,
+});
+// Wire tgCall into confirmHandler (circular dep resolved via setTgCall)
+confirmHandler.setTgCall(agentBot.tgCall);
+
+// --- StockPulse Telegram Bot (deprecated — only starts if agent bot token not set) ---
+const eventBus = { emit() {} };
 const llmQueue = createLLMQueue({ llm, eventBus });
 const pushEngine = createPushEngine({ db, config });
 const aiAnalyst = createAIAnalyst({ llmQueue, db, config });
@@ -113,5 +156,17 @@ app.listen(config.PORT, () => {
     scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
   }, 5 * 60 * 1000);
   priceStream.connectOKXWebSocket();
-  spBot.start(); // StockPulse TG bot polling
+
+  // Start TG bot — agent harness replaces StockPulse bot
+  if (config.TG_BOT_TOKEN) {
+    agentBot.startPolling();
+    log.info('agent_bot_started', { module: 'index' });
+    // Check compound on startup
+    if (agentCompound.shouldRun()) {
+      agentCompound.run().catch(e => log.error('compound_startup_error', { module: 'index', error: e.message }));
+    }
+  } else {
+    spBot.start(); // fallback to old StockPulse bot
+    log.info('stockpulse_bot_started', { module: 'index' });
+  }
 });

@@ -7,6 +7,9 @@
  *   - metrics for observability
  */
 
+import { createTGStream } from './stream.mjs';
+import { agentLoop } from '../loop.mjs';
+
 const POLL_TIMEOUT = 25;     // seconds
 const POLL_BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 30000;
@@ -45,9 +48,6 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
    * Handle a user message — run agent loop, stream response.
    */
   async function handleMessage(chatId, text, messageId) {
-    const { createTGStream } = await import('./stream.mjs');
-    const { agentLoop } = await import('../loop.mjs');
-
     const conversationId = String(chatId);
     const stream = createTGStream(chatId, tgCall);
     await stream.init();

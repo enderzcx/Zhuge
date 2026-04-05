@@ -68,8 +68,10 @@ export function createConfig() {
     { type: 'function', name: 'isAllowedTarget', inputs: [{ name: 'target', type: 'address' }], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   ];
 
-  // StockPulse
+  // Telegram
   const SP_BOT_TOKEN = process.env.SP_TELEGRAM_BOT_TOKEN || '';
+  const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || SP_BOT_TOKEN; // agent bot (fallback to SP)
+  const TG_CHAT_ID = process.env.TG_CHAT_ID || '';               // owner chat ID for auth
 
   const PRICE_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
   const ANOMALY_THRESHOLD = 0.02;  // 2% in 5min → instant analysis
@@ -119,6 +121,6 @@ export function createConfig() {
     LIFI_DIAMOND, SESSION_MANAGER_V2, CHAIN_MAP, CHAIN_OBJECTS, TOKEN_REGISTRY, SM_V2_ABI,
     PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
-    SP_BOT_TOKEN,
+    SP_BOT_TOKEN, TG_BOT_TOKEN, TG_CHAT_ID,
   };
 }
