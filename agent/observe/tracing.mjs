@@ -16,7 +16,7 @@ import { trace, SpanStatusCode, context } from '@opentelemetry/api';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import resourcePkg from '@opentelemetry/resources';
-const { Resource } = resourcePkg;
+const { resourceFromAttributes } = resourcePkg;
 
 let sdk = null;
 let tracer = null;
@@ -31,7 +31,7 @@ export function initTracing(serviceName = 'tradeagent', otlpEndpoint) {
   const exporter = new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` });
 
   sdk = new NodeSDK({
-    resource: new Resource({ 'service.name': serviceName }),
+    resource: resourceFromAttributes({ 'service.name': serviceName }),
     traceExporter: exporter,
   });
 
