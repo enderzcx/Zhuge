@@ -3,7 +3,8 @@
  */
 
 import { createHmac } from 'crypto';
-import { startRootSpan, endSpan } from '../agent/observe/tracing.mjs';
+import { startChildSpan, endSpan } from '../agent/observe/tracing.mjs';
+import { context } from '@opentelemetry/api';
 
 export function createBitgetClient(config, { metrics, log } = {}) {
   let _consecutiveFailures = 0;
@@ -14,7 +15,7 @@ export function createBitgetClient(config, { metrics, log } = {}) {
   }
 
   async function bitgetRequest(method, path, body = null) {
-    const { span } = startRootSpan(`bitget:${path.split('?')[0]}`, { method });
+    const { span } = startChildSpan(context.active(),`bitget:${path.split('?')[0]}`, { method });
     const ts = String(Date.now());
     const bodyStr = body ? JSON.stringify(body) : '';
     const sig = bitgetSign(ts, method, path, bodyStr);
@@ -55,7 +56,7 @@ export function createBitgetClient(config, { metrics, log } = {}) {
   }
 
   async function bitgetPublic(path) {
-    const { span } = startRootSpan(`bitget:${path.split('?')[0]}`, { method: 'GET' });
+    const { span } = startChildSpan(context.active(),`bitget:${path.split('?')[0]}`, { method: 'GET' });
     const start = Date.now();
     try {
     const res = await fetch(`${config.BITGET_BASE}${path}`, { signal: AbortSignal.timeout(8000) });

@@ -82,7 +82,8 @@ export function endSpan(span, error = null) {
 export async function withSpan(parentCtx, name, attributes, fn) {
   const { span, ctx } = startChildSpan(parentCtx, name, attributes);
   try {
-    const result = await fn(ctx);
+    // Set ctx as active so child calls using context.active() see this span as parent
+    const result = await context.with(ctx, () => fn(ctx));
     endSpan(span);
     return result;
   } catch (err) {

@@ -418,16 +418,16 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           return entries.map(e => `[${e.ts?.split('T')[1]?.slice(0, 8) || '?'}] ${e.level} ${e.event} ${e.module ? '(' + e.module + ')' : ''} ${e.error || ''}`).join('\n');
         }
         // Fallback: read log file directly
-        const { readdirSync: rd, readFileSync: rf } = await import('fs');
         const logDir = join(process.cwd(), 'data', 'logs');
-        const files = rd(logDir).filter(f => f.endsWith('.jsonl')).sort().reverse();
+        const files = readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort().reverse();
         if (!files.length) return 'No log files found';
-        const lines = rf(join(logDir, files[0]), 'utf-8').trim().split('\n').slice(-(maxLines || 20));
+        const lines = readFileSync(join(logDir, files[0]), 'utf-8').trim().split('\n').slice(-(maxLines || 20));
         const parsed = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+        const minLevel = LEVELS[level || 'info'] || 1;
         const filtered = parsed.filter(e => {
           if (module && e.module !== module) return false;
-          if (level === 'error' && e.level !== 'error') return false;
-          if (level === 'warn' && !['warn', 'error'].includes(e.level)) return false;
+          if ((LEVELS[e.level] || 0) < minLevel) return false;
           return true;
         });
         return filtered.map(e => `[${e.ts?.split('T')[1]?.slice(0, 8) || '?'}] ${e.level} ${e.event} ${e.module ? '(' + e.module + ')' : ''} ${e.error || ''}`).join('\n') || 'No matching logs';

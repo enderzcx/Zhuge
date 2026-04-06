@@ -4,6 +4,7 @@
  */
 
 import { startRootSpan, withSpan, endSpan } from './agent/observe/tracing.mjs';
+import { context } from '@opentelemetry/api';
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 

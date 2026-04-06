@@ -2,7 +2,8 @@
  * Generic agent runner: LLM with tool-calling loop.
  */
 
-import { startRootSpan, endSpan } from '../agent/observe/tracing.mjs';
+import { startChildSpan, endSpan } from '../agent/observe/tracing.mjs';
+import { context } from '@opentelemetry/api';
 
 export function createAgentRunner({ config, db, messageBus, metrics, log }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
@@ -39,7 +40,7 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
     let totalOutputTokens = 0;
 
     const agentModel = opts.model || config.AGENT_MODELS[agentName] || config.LLM_MODEL;
-    const { span: agentSpan } = startRootSpan(`agent:${agentName}`, { model: agentModel });
+    const { span: agentSpan } = startChildSpan(context.active(), `agent:${agentName}`, { model: agentModel });
     const messages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage },
