@@ -244,8 +244,10 @@ app.listen(config.PORT, () => {
           '',
           `Shutdown reason: ${signal}`,
         ];
-        const { writeFileSync } = await import('fs');
-        writeFileSync('agent/memory/context.md', lines.join('\n'), 'utf-8');
+        const { writeFileSync, renameSync } = await import('fs');
+        const ctxPath = 'agent/memory/context.md';
+        writeFileSync(ctxPath + '.tmp', lines.join('\n'), 'utf-8');
+        renameSync(ctxPath + '.tmp', ctxPath);
       } catch (e) { log.warn('context_save_failed', { module: 'index', error: e.message }); }
 
       log.info('shutdown_done', { module: 'index', signal });

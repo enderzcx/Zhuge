@@ -11,10 +11,12 @@ import { unlinkSync } from 'fs';
 import {
   MEMORY_DIR,
   MEMORY_TYPES,
+  NOTES_DIRNAME,
   ensureMemoryLayout,
   listRecallableMemories,
   readRecallableMemory,
   recallMemories,
+  removeIndexEntry,
   saveRecallableMemory,
 } from '../memory/recall.mjs';
 
@@ -359,6 +361,7 @@ export function createMemoryTools({ log }) {
         const memory = readRecallableMemory(slug, { memoryDir: MEMORY_DIR });
         if (!memory) return { error: `memory not found: ${slug}` };
         unlinkSync(memory.filePath);
+        removeIndexEntry(MEMORY_DIR, `${NOTES_DIRNAME}/${memory.slug}.md`);
         _log.info('memory_forgotten', { module: 'memory', slug, reason: reason || 'no reason' });
         return { ok: true, slug, deleted: memory.name };
       } catch (err) {

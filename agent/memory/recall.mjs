@@ -239,6 +239,16 @@ function upsertIndexEntry(memoryDir, { relativePath, name, description }) {
   atomicWrite(indexPath, content);
 }
 
+export function removeIndexEntry(memoryDir, relativePath) {
+  const indexPath = join(memoryDir, MEMORY_INDEX_FILE);
+  let content = readIndex(memoryDir);
+  const lines = content.split(/\r?\n/);
+  const filtered = lines.filter(line => !line.includes(`(${relativePath})`));
+  if (filtered.length !== lines.length) {
+    atomicWrite(indexPath, filtered.join('\n') + '\n');
+  }
+}
+
 export function saveRecallableMemory({
   memoryDir = MEMORY_DIR,
   slug,

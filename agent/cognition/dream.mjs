@@ -13,9 +13,11 @@ import { readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import {
   MEMORY_DIR,
+  NOTES_DIRNAME,
   listRecallableMemories,
   saveRecallableMemory,
   readRecallableMemory,
+  removeIndexEntry,
   atomicWrite,
 } from '../memory/recall.mjs';
 
@@ -140,12 +142,13 @@ ${directives.slice(0, 400) || '(empty)'}
             content: m.merged_content,
             overwrite: true,
           });
-          // Delete absorbed notes
+          // Delete absorbed notes + clean index
           for (const slug of m.absorb) {
             const absorbed = readRecallableMemory(slug, { memoryDir: MEMORY_DIR });
             if (absorbed) {
               backup.merged_absorbs.push({ slug, name: absorbed.name, body: absorbed.body.slice(0, 300) });
               unlinkSync(absorbed.filePath);
+              removeIndexEntry(MEMORY_DIR, `${NOTES_DIRNAME}/${slug}.md`);
             }
           }
           merged++;
@@ -163,6 +166,7 @@ ${directives.slice(0, 400) || '(empty)'}
           if (!note) continue;
           backup.deleted_notes.push({ slug: d.slug, name: note.name, body: note.body.slice(0, 300), reason: d.reason });
           unlinkSync(note.filePath);
+          removeIndexEntry(MEMORY_DIR, `${NOTES_DIRNAME}/${d.slug}.md`);
           deleted++;
           _log.info('dream_deleted', { module: 'dream', slug: d.slug, reason: d.reason });
         } catch (err) {
