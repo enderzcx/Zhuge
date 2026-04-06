@@ -13,8 +13,9 @@ import * as lancedb from '@lancedb/lancedb';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
-const EMBED_MODEL = 'text-embedding-3-small';
-const EMBED_DIM = 1536;
+// Local Ollama embedding — zero cost, zero latency, no API key needed
+const EMBED_MODEL = 'nomic-embed-text';
+const EMBED_DIM = 768;
 const TABLE_NAME = 'knowledge';
 
 export function createRAG({ config, log }) {
@@ -25,13 +26,11 @@ export function createRAG({ config, log }) {
   // --- Embedding via OpenAI-compatible API ---
 
   async function embed(text) {
-    const base = config.EMBED_BASE || 'https://api.openai.com/v1';
-    const key = config.EMBED_KEY || config.LLM_KEY;
-    if (!key) throw new Error('No embedding API key (EMBED_KEY or LLM_KEY)');
+    const base = config.EMBED_BASE || 'http://localhost:11434/v1';
 
     const res = await fetch(`${base}/embeddings`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ input: text.slice(0, 8000), model: EMBED_MODEL }),
       signal: AbortSignal.timeout(15000),
     });
