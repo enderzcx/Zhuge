@@ -2,7 +2,7 @@
  * Analyst agent: system prompt builder, tools, and executors.
  */
 
-export function createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators }) {
+export function createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag, metrics }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { bitgetPublic } = bitgetClient;
   const { parseCandles, computeIndicators } = indicators;
@@ -101,6 +101,14 @@ PROACTIVE TRADING — you are NOT passive:
 - SL:TP ratio must be >= 1:2 (risk $1 to make $2+)
 - Left-side entries preferred: buy at support BEFORE confirmation, not after breakout
 
+TOOL USAGE — YOU decide what data you need:
+- You have 7 tools. Do NOT call all of them every time. Choose based on what matters NOW.
+- Always call: get_crucix_data (macro context) + get_prices (current prices)
+- Call get_technical_indicators ONLY for symbols you're seriously considering trading
+- Call get_trade_performance if you need to calibrate confidence (e.g. after losses)
+- Call search_knowledge when you see a pattern you want to cross-reference (e.g. "is this a Wyckoff accumulation?", "what happens after VIX spikes?")
+- Call get_system_metrics to check your own accuracy and veto rate — if veto rate is high, adjust your approach
+
 SYMBOL SELECTION (crypto mode):
 - You MUST compare BTC, ETH, and SOL technical setups and pick the single best opportunity
 - Prefer: strongest RSI signal, clearest trend, best risk/reward ratio
@@ -183,6 +191,29 @@ Rules:
       function: {
         name: 'get_trade_performance',
         description: 'Get recent trading performance: win rate, PnL, consecutive losses, recent trades. Use this to calibrate confidence and aggressiveness.',
+        parameters: { type: 'object', properties: {}, required: [] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_knowledge',
+        description: 'Search the trading knowledge base (48+ entries): strategies (Wyckoff, SMC, ICT, 0.31 Fib), indicators (RSI divergence, OI, funding rate), risk rules (FOMC, black swan), historical cases (LUNA, FTX, halving). Use when you see a pattern you want to cross-reference with known strategies.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'What to search for (e.g. "funding rate extreme", "Wyckoff accumulation", "VIX spike history")' },
+            category: { type: 'string', description: 'Optional filter: strategy, indicator, risk_rule, case, market', enum: ['strategy', 'indicator', 'risk_rule', 'case', 'market'] },
+          },
+          required: ['query'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'get_system_metrics',
+        description: 'Check your own recent performance metrics: signal accuracy, veto rate, LLM latency, errors. Use to self-calibrate.',
         parameters: { type: 'object', properties: {}, required: [] },
       },
     },
@@ -278,6 +309,28 @@ Rules:
             : 'NORMAL: performance acceptable',
         });
       } catch { return JSON.stringify({ error: 'Trade stats unavailable' }); }
+    },
+    search_knowledge: async (args) => {
+      try {
+        const results = await rag.search(args.query, { limit: 3, category: args.category });
+        if (!results || results.length === 0) return JSON.stringify({ results: [], note: 'No matching knowledge' });
+        return JSON.stringify(results.map(r => ({ title: r.title, content: r.content?.slice(0, 200), category: r.category, score: r.score })));
+      } catch { return JSON.stringify({ results: [], note: 'Knowledge search unavailable' }); }
+    },
+    get_system_metrics: async () => {
+      try {
+        const h24 = Date.now() - 24 * 3600000;
+        const accuracy = db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN correct_1h=1 THEN 1 ELSE 0 END) as ok_1h, SUM(CASE WHEN correct_4h=1 THEN 1 ELSE 0 END) as ok_4h FROM signal_scores WHERE scored_at > datetime('now', '-24 hours')").get();
+        const vetoes = db.prepare("SELECT COUNT(*) as cnt FROM decisions WHERE agent='risk' AND action='veto' AND timestamp > datetime('now', '-24 hours')").get();
+        const analyses = db.prepare("SELECT COUNT(*) as cnt FROM analysis WHERE created_at > datetime('now', '-24 hours')").get();
+        const errors = metrics?.stats?.('error_count', h24) || { sum: 0 };
+        return JSON.stringify({
+          signal_accuracy_24h: accuracy.total > 0 ? { total: accuracy.total, hit_1h: `${Math.round(accuracy.ok_1h / accuracy.total * 100)}%`, hit_4h: `${Math.round(accuracy.ok_4h / accuracy.total * 100)}%` } : 'no data',
+          veto_rate_24h: analyses.cnt > 0 ? `${vetoes.cnt}/${analyses.cnt} (${Math.round(vetoes.cnt / analyses.cnt * 100)}%)` : 'no data',
+          error_count_24h: errors.sum || 0,
+          note: 'Use this to calibrate your confidence. High veto rate = lower your confidence or change approach.',
+        });
+      } catch { return JSON.stringify({ error: 'Metrics unavailable' }); }
     },
   };
 

@@ -79,7 +79,8 @@ const dataSources = createDataSources(config);
 const priceStream = createPriceStream({ db, config, log, metrics });
 const signals = createSignalScoring({ db });
 const lifi = createLiFi(config);
-const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators });
+const _ragRef = { instance: null };
+const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics });
 const riskAgent = createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
@@ -109,6 +110,7 @@ _compoundRef.instance = agentCompound; // wire into scanner via getter
 const rag = createRAG({ config, log });
 await rag.init();
 await rag.seed('data/seed-knowledge.json').catch(e => log.warn('rag_seed_failed', { module: 'index', error: e.message }));
+_ragRef.instance = rag; // wire into analyst via getter
 
 // Register tools
 const systemTools = createSystemTools({ log });
