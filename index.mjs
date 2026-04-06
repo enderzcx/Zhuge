@@ -80,7 +80,8 @@ const priceStream = createPriceStream({ db, config, log, metrics });
 const signals = createSignalScoring({ db });
 const lifi = createLiFi(config);
 const _ragRef = { instance: null };
-const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics });
+const _researcherRef = { instance: null };
+const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics, researcher: { researchCoin: (...a) => _researcherRef.instance?.researchCoin(...a) } });
 const riskAgent = createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
@@ -92,6 +93,7 @@ const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram,
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
 const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer, log, metrics });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources, log });
+_researcherRef.instance = researcher;
 const _compoundRef = { instance: null };
 const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {} }, log, metrics });
 // Push engine created after agentBot (needs tgSend)

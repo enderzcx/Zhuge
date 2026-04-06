@@ -128,8 +128,9 @@ Respond with JSON:
         try {
           // Try to get candles from Bitget
           if (bitgetClient) {
+            const evalTF = strategy.timeframe === 'any' ? '1H' : (strategy.timeframe || '1H');
             const candles = await bitgetClient.bitgetPublic(
-              `/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=50`
+              `/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=${evalTF}&limit=50`
             );
             if (candles?.length) {
               const closes = candles.map(k => parseFloat(k[4])).reverse();

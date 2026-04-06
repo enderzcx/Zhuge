@@ -43,7 +43,8 @@ export function createScanner({ db, config, bitgetClient, agentRunner, indicator
       const opportunities = [];
       for (const c of candidates.slice(0, 10)) {
         try {
-          const candles = await bitgetPublic(`/api/v2/mix/market/candles?symbol=${c.symbol}&productType=USDT-FUTURES&granularity=1H&limit=50`);
+          const scanTF = config.MOMENTUM?.timeframe || '1H';
+          const candles = await bitgetPublic(`/api/v2/mix/market/candles?symbol=${c.symbol}&productType=USDT-FUTURES&granularity=${scanTF}&limit=50`);
           if (!candles?.length) continue;
 
           const closes = candles.map(k => parseFloat(k[4])).reverse();

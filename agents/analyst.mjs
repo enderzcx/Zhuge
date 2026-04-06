@@ -2,7 +2,7 @@
  * Analyst agent: system prompt builder, tools, and executors.
  */
 
-export function createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag, metrics }) {
+export function createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag, metrics, researcher }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { bitgetPublic } = bitgetClient;
   const { parseCandles, computeIndicators } = indicators;
@@ -177,11 +177,12 @@ Rules:
       type: 'function',
       function: {
         name: 'get_technical_indicators',
-        description: 'Fetch technical indicators for BTC and ETH from Bitget: 1H and 4H candles with EMA20, RSI(7/14), MACD, ATR, Bollinger Bands, Fibonacci 0.31 level, support/resistance, and Open Interest + funding rate. Essential for precise entry/exit timing.',
+        description: 'Fetch technical indicators from Bitget: EMA20, RSI(7/14), MACD, ATR, Bollinger, Fib 0.31, support/resistance, OI + funding. You choose which timeframes to analyze — use shorter TFs (5m/15m) for scalp timing, 1H/4H for swing, 1D for trend context.',
         parameters: {
           type: 'object',
           properties: {
-            symbol: { type: 'string', description: 'Symbol (default: BTCUSDT). Options: BTCUSDT, ETHUSDT, SOLUSDT', enum: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] },
+            symbol: { type: 'string', description: 'Symbol (default: BTCUSDT)', enum: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] },
+            timeframes: { type: 'string', description: 'Comma-separated timeframes to analyze (default: "1H,4H"). Options: 5m, 15m, 30m, 1H, 4H, 1D. Max 3.' },
           },
         },
       },
@@ -217,6 +218,20 @@ Rules:
         parameters: { type: 'object', properties: {}, required: [] },
       },
     },
+    {
+      type: 'function',
+      function: {
+        name: 'request_coin_research',
+        description: 'Ask the Researcher agent to analyze a specific coin. Returns momentum score (0-100), verdict (TRADE/WATCH/SKIP), and detailed 4-dimension analysis. Use when you spot an interesting coin that needs deeper research.',
+        parameters: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Bitget futures symbol (e.g. XRPUSDT, DOGEUSDT, ARBUSDT)' },
+          },
+          required: ['symbol'],
+        },
+      },
+    },
   ];
 
   const ANALYST_EXECUTORS = {
@@ -244,42 +259,44 @@ Rules:
     },
     get_technical_indicators: async (args) => {
       const symbol = args.symbol || 'BTCUSDT';
+      const VALID_TFS = ['5m', '15m', '30m', '1H', '2H', '4H', '6H', '12H', '1D'];
+      const LIMITS = { '5m': 100, '15m': 100, '30m': 60, '1H': 100, '2H': 50, '4H': 50, '6H': 30, '12H': 30, '1D': 30 };
+
+      // Parse requested timeframes (default: 1H,4H for backward compat)
+      const requestedTFs = (args.timeframes || '1H,4H')
+        .split(',').map(t => t.trim()).filter(t => VALID_TFS.includes(t)).slice(0, 3);
+      if (requestedTFs.length === 0) requestedTFs.push('1H', '4H');
+
       try {
-        // Fetch 1H and 4H candles in parallel
-        const [candles1h, candles4h, oiData, tickerData] = await Promise.all([
-          bitgetPublic(`/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=100`),
-          bitgetPublic(`/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=4H&limit=50`),
+        // Fetch candles for all requested TFs + OI + ticker in parallel
+        const fetches = requestedTFs.map(tf =>
+          bitgetPublic(`/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=${tf}&limit=${LIMITS[tf] || 50}`)
+            .then(c => ({ tf, candles: c })).catch(() => ({ tf, candles: null }))
+        );
+        const [oiData, tickerData, ...candleResults] = await Promise.all([
           bitgetPublic(`/api/v2/mix/market/open-interest?symbol=${symbol}&productType=USDT-FUTURES`).catch(() => null),
           bitgetPublic(`/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`).catch(() => null),
+          ...fetches,
         ]);
 
-        const parse1h = parseCandles(candles1h);
-        const parse4h = parseCandles(candles4h);
+        // Compute indicators per timeframe
+        const result = { symbol };
+        for (const { tf, candles } of candleResults) {
+          if (candles) {
+            result[tf] = computeIndicators(parseCandles(candles), tf);
+          }
+        }
 
-        // Compute indicators for 1H
-        const tech1h = computeIndicators(parse1h, '1H');
-        // Compute indicators for 4H
-        const tech4h = computeIndicators(parse4h, '4H');
-
-        // Open Interest (API returns array)
+        // Open Interest
         const oiObj = Array.isArray(oiData) ? oiData[0] : oiData;
-        const oi = oiObj ? {
-          amount: oiObj.openInterest || oiObj.amount,
-          value_usd: oiObj.openInterestUsd || oiObj.value,
-        } : null;
+        result.open_interest = oiObj ? { amount: oiObj.openInterest || oiObj.amount, value_usd: oiObj.openInterestUsd || oiObj.value } : null;
 
-        // Funding rate from ticker
+        // Funding rate
         const ticker = Array.isArray(tickerData) ? tickerData[0] : tickerData;
-        const fundingRate = ticker?.fundingRate ? parseFloat(ticker.fundingRate) : null;
+        result.funding_rate = ticker?.fundingRate ? parseFloat(ticker.fundingRate) : null;
+        result.funding_rate_pct = result.funding_rate ? (result.funding_rate * 100).toFixed(4) + '%' : null;
 
-        return JSON.stringify({
-          symbol,
-          '1H': tech1h,
-          '4H': tech4h,
-          open_interest: oi,
-          funding_rate: fundingRate,
-          funding_rate_pct: fundingRate ? (fundingRate * 100).toFixed(4) + '%' : null,
-        });
+        return JSON.stringify(result);
       } catch (err) {
         return JSON.stringify({ error: `Tech indicators failed: ${err.message}` });
       }
@@ -331,6 +348,25 @@ Rules:
           note: 'Use this to calibrate your confidence. High veto rate = lower your confidence or change approach.',
         });
       } catch { return JSON.stringify({ error: 'Metrics unavailable' }); }
+    },
+    request_coin_research: async (args) => {
+      const symbol = (args.symbol || '').toUpperCase();
+      if (!symbol) return JSON.stringify({ error: 'symbol required' });
+      if (!researcher?.researchCoin) return JSON.stringify({ error: 'Researcher not available' });
+      try {
+        const report = await researcher.researchCoin(symbol, { symbol, type: 'analyst_request' });
+        if (!report) return JSON.stringify({ error: 'Research returned no result', symbol });
+        return JSON.stringify({
+          symbol,
+          total_score: report.total_score,
+          verdict: report.verdict,
+          direction: report.direction,
+          reasoning: (report.reasoning || '').slice(0, 300),
+          dimensions: report.dimensions || {},
+        });
+      } catch (err) {
+        return JSON.stringify({ error: `Research failed: ${err.message}`, symbol });
+      }
     },
   };
 
