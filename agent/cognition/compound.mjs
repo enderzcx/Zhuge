@@ -81,34 +81,74 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       hold_duration_min: t.hold_duration_min,
     }));
 
-    // Load recent veto decisions — analyst signals that risk rejected
+    // --- Gather system-wide review data (not just trades) ---
+
+    // 1. Risk veto patterns
     let vetoData = [];
     try {
       const vetoes = db.prepare(
         "SELECT timestamp, confidence, output_summary FROM decisions WHERE agent = 'risk' AND action = 'veto' AND timestamp > datetime('now', '-7 days') ORDER BY timestamp DESC LIMIT 20"
       ).all();
-      vetoData = vetoes.map(v => ({
-        timestamp: v.timestamp,
-        confidence: v.confidence,
-        reason: (v.output_summary || '').slice(0, 150),
-      }));
+      vetoData = vetoes.map(v => ({ ts: v.timestamp, conf: v.confidence, reason: (v.output_summary || '').slice(0, 100) }));
     } catch {}
 
-    const vetoSection = vetoData.length > 0
-      ? `\n最近 ${vetoData.length} 次被 Risk Agent 否决的信号:\n${JSON.stringify(vetoData, null, 1)}\n`
-      : '';
+    // 2. Signal accuracy (analyst prediction vs reality)
+    let signalAccuracy = null;
+    try {
+      signalAccuracy = db.prepare(
+        "SELECT COUNT(*) as total, SUM(CASE WHEN correct_1h=1 THEN 1 ELSE 0 END) as ok_1h, SUM(CASE WHEN correct_4h=1 THEN 1 ELSE 0 END) as ok_4h FROM signal_scores WHERE scored_at > datetime('now', '-7 days')"
+      ).get();
+    } catch {}
 
-    const prompt = `你是一个交易复盘专家。以下是最近 ${trades.length} 笔交易的完整数据:
+    // 3. Momentum funnel (discovered → researched → traded)
+    let momentumFunnel = null;
+    try {
+      momentumFunnel = db.prepare(
+        "SELECT COUNT(*) as discovered, SUM(CASE WHEN traded=1 THEN 1 ELSE 0 END) as traded, SUM(CASE WHEN research_verdict='TRADE' THEN 1 ELSE 0 END) as trade_worthy FROM coin_candidates WHERE discovered_at > datetime('now', '-7 days')"
+      ).get();
+    } catch {}
 
+    // 4. Analyst action distribution
+    let analystActions = [];
+    try {
+      analystActions = db.prepare(
+        "SELECT recommended_action, COUNT(*) as cnt, ROUND(AVG(confidence),1) as avg_conf FROM analysis WHERE created_at > datetime('now', '-7 days') GROUP BY recommended_action"
+      ).all();
+    } catch {}
+
+    // 5. System errors
+    let errorCount = 0;
+    try {
+      const r = db.prepare("SELECT COALESCE(SUM(value),0) as total FROM metrics WHERE name='error_count' AND ts > ?").get(Date.now() - 7 * 86400000);
+      errorCount = r.total || 0;
+    } catch {}
+
+    // --- Build comprehensive review prompt ---
+
+    const systemReview = [
+      vetoData.length > 0 ? `Risk 否决记录 (${vetoData.length}次/7天):\n${JSON.stringify(vetoData, null, 1)}` : '',
+      signalAccuracy ? `信号准确率 (7天): 总${signalAccuracy.total}条, 1h正确${signalAccuracy.ok_1h} (${signalAccuracy.total > 0 ? Math.round(signalAccuracy.ok_1h / signalAccuracy.total * 100) : 0}%), 4h正确${signalAccuracy.ok_4h} (${signalAccuracy.total > 0 ? Math.round(signalAccuracy.ok_4h / signalAccuracy.total * 100) : 0}%)` : '',
+      momentumFunnel ? `Momentum漏斗 (7天): 发现${momentumFunnel.discovered}币 → 值得交易${momentumFunnel.trade_worthy} → 实际交易${momentumFunnel.traded}` : '',
+      analystActions.length > 0 ? `Analyst 行动分布 (7天):\n${analystActions.map(a => `  ${a.recommended_action}: ${a.cnt}次, 平均confidence ${a.avg_conf}`).join('\n')}` : '',
+      errorCount > 0 ? `系统错误: ${errorCount}次 (7天)` : '',
+    ].filter(Boolean).join('\n\n');
+
+    const prompt = `你是一个交易系统复盘专家。你要复盘的不只是交易结果，还有整个决策流程和系统表现。
+
+## 交易数据 (${trades.length}笔已关闭)
 ${JSON.stringify(tradeData, null, 1)}
-${vetoSection}
-${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRules, null, 1)}\n` : ''}
-请分析:
-1. 赢的交易有什么共同点? 亏的呢?
-2. 有没有应该避免的条件组合?
-3. 有没有表现特别好的条件?
-4. 已有规则是否需要更新或废弃?
-5. Risk Agent 连续否决信号的模式: analyst 是否在持续产出低质量信号? 还是 risk 阈值过于保守? 给出具体建议。
+
+## 系统运行状况
+${systemReview}
+
+${existingRules.length > 0 ? `## 当前已有规则\n${JSON.stringify(existingRules, null, 1)}\n` : ''}
+请全面分析:
+1. 交易复盘: 赢/亏的共同点? 应避免的条件? 表现好的条件?
+2. 决策流程: Risk 否决模式是否合理? analyst 信号质量如何? 要调阈值吗?
+3. 信号校准: analyst 预测准确率是否在改善? 哪个方向（long/short）更准?
+4. Momentum 效率: 发现→交易的转化率是否合理? scanner 要调参吗?
+5. 已有规则: 是否需要更新或废弃?
+6. 系统建议: 整体有什么需要优化的?
 
 输出 JSON 数组, 每条规则:
 {
