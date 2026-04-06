@@ -148,6 +148,31 @@ export async function* agentLoop(conversationId, userMessage, deps) {
       // Continue loop — LLM will process tool results
     }
 
+    // Memory checkpoint: if no save_memory was called this conversation, force one more round
+    const calledSaveMemory = allToolCalls.some(tc => tc.name === 'save_memory' || tc.name === 'save_recallable_memory');
+    if (!calledSaveMemory && rounds > 0 && rounds < MAX_ROUNDS && finalContent) {
+      _log.info('memory_checkpoint', { module: 'agent-loop', conversationId, msg: 'no save_memory called, nudging' });
+      history.add(conversationId, {
+        role: 'user',
+        content: '[system] 对话即将结束。请调用 save_memory 更新 context.md（当前状态/结论/未完成事项）。这是强制要求。',
+      });
+      const nudgeMessages = await history.getMessages(conversationId);
+      const nudgeFull = [{ role: 'system', content: await buildSystemPrompt({ conversationId, userMessage }) }, ...nudgeMessages];
+      for await (const chunk of agentLLM.chatStream(nudgeFull, { model: modelSelector.select(conversationId, '', {}), tools: executor.getToolDefs() })) {
+        if (chunk.done && chunk.tool_calls?.length > 0) {
+          for (const tc of chunk.tool_calls) {
+            const fnName = tc.function?.name;
+            if (fnName === 'save_memory' || fnName === 'save_recallable_memory') {
+              let args; try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { args = {}; }
+              await executor.execute(fnName, args);
+              allToolCalls.push({ name: fnName, args, result: 'auto', duration_ms: 0 });
+              _log.info('memory_auto_saved', { module: 'agent-loop', tool: fnName });
+            }
+          }
+        }
+      }
+    }
+
     // Done
     const totalDuration = Date.now() - loopStart;
     _m.record('agent_loop_ms', totalDuration, { rounds, tools: allToolCalls.length });

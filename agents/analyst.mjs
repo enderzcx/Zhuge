@@ -221,6 +221,14 @@ Rules:
     {
       type: 'function',
       function: {
+        name: 'get_my_last_analysis',
+        description: 'Read your own most recent analysis output — what you concluded last cycle, what actions you recommended, what you flagged. Use this to maintain continuity between cycles.',
+        parameters: { type: 'object', properties: {}, required: [] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
         name: 'request_coin_research',
         description: 'Ask the Researcher agent to analyze a specific coin. Returns momentum score (0-100), verdict (TRADE/WATCH/SKIP), and detailed 4-dimension analysis. Use when you spot an interesting coin that needs deeper research.',
         parameters: {
@@ -348,6 +356,21 @@ Rules:
           note: 'Use this to calibrate your confidence. High veto rate = lower your confidence or change approach.',
         });
       } catch { return JSON.stringify({ error: 'Metrics unavailable' }); }
+    },
+    get_my_last_analysis: async () => {
+      try {
+        const row = db.prepare(
+          "SELECT timestamp, output_summary, reasoning, confidence FROM decisions WHERE agent = 'analyst' AND action = 'analyze' ORDER BY timestamp DESC LIMIT 1"
+        ).get();
+        if (!row) return JSON.stringify({ note: 'No previous analysis found — this is your first cycle.' });
+        return JSON.stringify({
+          last_analysis_at: row.timestamp,
+          summary: (row.output_summary || '').slice(0, 400),
+          reasoning: (row.reasoning || '').slice(0, 300),
+          confidence: row.confidence,
+          note: 'This is what you concluded last time. Use it for continuity — confirm, update, or revise.',
+        });
+      } catch { return JSON.stringify({ note: 'Decision history unavailable' }); }
     },
     request_coin_research: async (args) => {
       const symbol = (args.symbol || '').toUpperCase();

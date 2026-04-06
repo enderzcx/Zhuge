@@ -222,6 +222,25 @@ app.listen(config.PORT, () => {
       health.stop();
       // Sync trades one last time (detect fills before exit)
       await bitgetExec.checkAndSyncTrades().catch(() => {});
+      // Auto-save context.md — dump structured state so next startup has continuity
+      try {
+        const openTrades = db.prepare("SELECT pair, side, leverage, entry_price FROM trades WHERE status = 'open'").all();
+        const recentDecisions = db.prepare("SELECT agent, action, output_summary, timestamp FROM decisions ORDER BY timestamp DESC LIMIT 3").all();
+        const lines = [
+          `# Auto-saved context (${new Date().toISOString()})`,
+          '',
+          `## Open Positions (${openTrades.length})`,
+          openTrades.length > 0 ? openTrades.map(t => `- ${t.pair} ${t.side} ${t.leverage}x @ ${t.entry_price}`).join('\n') : '- None',
+          '',
+          '## Recent Decisions',
+          recentDecisions.map(d => `- [${d.agent}] ${d.action}: ${(d.output_summary || '').slice(0, 100)}`).join('\n'),
+          '',
+          `Shutdown reason: ${signal}`,
+        ];
+        const { writeFileSync } = await import('fs');
+        writeFileSync('agent/memory/context.md', lines.join('\n'), 'utf-8');
+      } catch (e) { log.warn('context_save_failed', { module: 'index', error: e.message }); }
+
       log.info('shutdown_done', { module: 'index', signal });
       // Flush OTel traces before closing
       await shutdownTracing().catch(() => {});
