@@ -1,0 +1,182 @@
+[
+  {
+    "title": "Wyckoff 吸筹阶段特征",
+    "content": "Wyckoff 吸筹 (Accumulation) 表现为价格在窄幅区间震荡，成交量逐渐萎缩。关键事件：Selling Climax (SC) 放量急跌后反弹，Automatic Rally (AR) 确定区间上沿，Spring/Shakeout 最后一次假跌破下沿洗出散户后快速收回。Spring 之后放量突破 AR 是入场信号。",
+    "category": "strategy",
+    "tags": "wyckoff,accumulation,底部形态"
+  },
+  {
+    "title": "Wyckoff 派发阶段特征",
+    "content": "Wyckoff 派发 (Distribution) 表现为价格在高位震荡，成交量在上涨时减少、下跌时增加。关键事件：Buying Climax (BC) 放量冲高回落，Upthrust (UT) 假突破上沿后快速回落。UT 之后放量跌破区间下沿是做空/离场信号。",
+    "category": "strategy",
+    "tags": "wyckoff,distribution,顶部形态"
+  },
+  {
+    "title": "SMC Order Block 交易",
+    "content": "Smart Money Concepts: Order Block 是机构大单密集成交区域，通常是趋势反转前的最后一根反向 K 线。看涨 OB：下跌趋势中最后一根阴线（开盘价到最低价区域）。价格回踩 OB 区域时入场做多，止损放 OB 下方。",
+    "category": "strategy",
+    "tags": "smc,order_block,支撑阻力"
+  },
+  {
+    "title": "ICT Fair Value Gap",
+    "content": "ICT 理论：Fair Value Gap (FVG) 是三根 K 线中间那根与上下两根不重叠的区域，代表价格失衡。看涨 FVG：第一根高点低于第三根低点。价格回填 FVG 时是入场机会。加密市场中 FVG 经常在高波动后出现，回填概率约 60-70%。",
+    "category": "strategy",
+    "tags": "ict,fvg,价格失衡"
+  },
+  {
+    "title": "均值回归策略",
+    "content": "价格偏离均值（通常用 20 期 SMA 或 VWAP）过远时会回归。Bollinger Band 触及上轨 + RSI > 70 = 超买回归做空机会。触及下轨 + RSI < 30 = 超卖回归做多机会。加密市场均值回归在横盘期有效，趋势期失效。需配合成交量确认。",
+    "category": "strategy",
+    "tags": "均值回归,bollinger,rsi"
+  },
+  {
+    "title": "动量突破策略",
+    "content": "价格突破关键阻力位 + 成交量放大 2x 以上 = 有效突破。假突破特征：突破时量能不足，或突破后快速回落跌破突破位。确认方法：突破后回踩不破原阻力（现变支撑）再入场。时间过滤：亚洲盘突破假信号多，美盘突破可靠性更高。",
+    "category": "strategy",
+    "tags": "突破,momentum,成交量"
+  },
+  {
+    "title": "RSI 背离信号",
+    "content": "看涨背离：价格创新低但 RSI 不创新低 → 下跌动能衰竭，可能反转。看跌背离：价格创新高但 RSI 不创新高 → 上涨动能衰竭。隐藏背离：趋势中 RSI 与价格同向但幅度不同 → 趋势延续信号。加密市场 RSI 背离在 4H 以上周期更可靠，1H 以下噪音多。",
+    "category": "indicator",
+    "tags": "rsi,背离,反转"
+  },
+  {
+    "title": "MACD 金叉死叉实战",
+    "content": "MACD 金叉（快线上穿慢线）在零轴上方更可靠（顺势做多）。零轴下方的金叉可能只是反弹。Histogram 从负转正 = 动能转换。加密市场中 MACD 在日线级别信号最好，4H 次之，1H 噪音大。配合成交量放大使用效果更佳。",
+    "category": "indicator",
+    "tags": "macd,金叉,动能"
+  },
+  {
+    "title": "Bollinger Band 挤压突破",
+    "content": "Bollinger 带宽收窄到极值（Band Width < 历史 20% 分位）= 即将爆发大行情。方向未知，需等突破确认。上轨突破 + 量能放大 = 做多。下轨突破 + 量能放大 = 做空。Squeeze 持续越久，突破后的行情越大。加密市场 squeeze 通常在周末开始，周一/二突破。",
+    "category": "indicator",
+    "tags": "bollinger,squeeze,波动率"
+  },
+  {
+    "title": "Funding Rate 极端值交易",
+    "content": "Funding Rate > 0.05% = 多头拥挤，做多成本高，回调概率大。Funding Rate < -0.03% = 空头拥挤，空头挤压（short squeeze）概率大。极端 FR（>0.1% 或 <-0.1%）通常在 4-12 小时内导致反向运动。但注意：趋势行情中 FR 可以持续极端很久。",
+    "category": "indicator",
+    "tags": "funding_rate,挤压,反转"
+  },
+  {
+    "title": "OI 与价格的背离",
+    "content": "Open Interest 上升 + 价格上升 = 新多头入场，趋势可能持续。OI 上升 + 价格下降 = 新空头入场，下跌可能加速。OI 下降 + 价格上升 = 空头平仓推动的上涨（可持续性差）。OI 下降 + 价格下降 = 多头平仓，抛压减轻，可能接近底部。",
+    "category": "indicator",
+    "tags": "open_interest,背离,持仓量"
+  },
+  {
+    "title": "Fibonacci 0.618 回撤",
+    "content": "上涨趋势中回调到 0.618 位置是经典买入点。如果 0.618 与前期支撑/阻力、EMA20 重合 = 强支撑。跌破 0.618 后目标通常是 0.786 或起涨点。加密市场中 Fib 0.5 和 0.618 的命中率最高（约 55-65%）。Fib 0.31 是 alpha 级别的精确支撑阻力。",
+    "category": "indicator",
+    "tags": "fibonacci,回撤,支撑"
+  },
+  {
+    "title": "FOMC 会议前后行情规律",
+    "content": "FOMC 前 24-48 小时：波动率收缩，市场观望。决议公布后 30 分钟内：剧烈波动（通常先假突破再反转）。鲍威尔讲话期间：每句话都可能导致 1-2% 波动。历史规律：FOMC 后 BTC 倾向于跟随美股方向。交易建议：FOMC 前减仓或收窄止损，决议后等 1 小时再入场。",
+    "category": "risk_rule",
+    "tags": "fomc,美联储,波动率"
+  },
+  {
+    "title": "CPI 数据发布影响",
+    "content": "CPI 高于预期 = 加息预期升温，risk-off，BTC 通常下跌。CPI 低于预期 = 降息预期升温，risk-on，BTC 通常上涨。但市场定价在先——如果已经充分定价了坏消息，实际发布后可能反涨（利空出尽）。数据发布后 5 分钟内的走势不可靠，等 15-30 分钟看真实方向。",
+    "category": "risk_rule",
+    "tags": "cpi,宏观,通胀"
+  },
+  {
+    "title": "黑天鹅事件模式识别",
+    "content": "黑天鹅前兆：VIX 持续低位（<15）很久 + 市场杠杆率极高 + 风险资产高度相关。黑天鹅特征：单日跌幅 >10%，成交量暴增 5-10x，funding rate 极端负值。应对：不抄底第一波，等 funding rate 恢复正常 + 成交量回落 + 24h 内不再创新低后再考虑入场。",
+    "category": "risk_rule",
+    "tags": "黑天鹅,vix,极端行情"
+  },
+  {
+    "title": "流动性陷阱警告",
+    "content": "低流动性时段（亚洲午夜、欧美假日）容易出现闪崩或插针。特征：买卖盘口 spread 增大 2-3x，orderbook 深度变浅。风险：止损容易被精确打到后价格快速收回。应对：低流动性时段加宽止损 20-30%，或直接不交易。周末 BTC 流动性通常只有工作日的 30-40%。",
+    "category": "risk_rule",
+    "tags": "流动性,闪崩,插针"
+  },
+  {
+    "title": "连续亏损心理管理",
+    "content": "连续亏损 3 笔后：强制休息至少 1 小时，不报复性交易。心理学研究：连续亏损后人类（和 AI）倾向于加大仓位试图回本，这是最危险的行为。正确做法：降低仓位到正常的 50%，只做最高确信度的机会，等恢复后再回到正常仓位。",
+    "category": "risk_rule",
+    "tags": "心理,连续亏损,风控"
+  },
+  {
+    "title": "LUNA/UST 崩盘模式",
+    "content": "2022 年 5 月 LUNA 崩盘特征：算法稳定币脱锚 → 死亡螺旋。前兆：UST 轻微脱锚（0.98-0.99）时多数人认为能恢复。关键信号：大额赎回 → Anchor 存款下降 → 更多恐慌赎回。教训：任何依赖自身 token 维持锚定的稳定币都有死亡螺旋风险。看到稳定币脱锚立即避险。",
+    "category": "case",
+    "tags": "luna,稳定币,崩盘"
+  },
+  {
+    "title": "FTX 崩盘信号回顾",
+    "content": "2022 年 11 月 FTX 崩盘前兆：CoinDesk 报道 Alameda 资产负债表问题 → Binance 宣布抛售 FTT → FTT 价格暴跌 → 挤兑。关键教训：交易所 token 暴跌 >30% = 立即提币不犹豫。中心化交易所的 proof of reserves 不等于安全。分散存储（多交易所 + 冷钱包）是基本功。",
+    "category": "case",
+    "tags": "ftx,交易所,挤兑"
+  },
+  {
+    "title": "BTC ETF 批准前后行情",
+    "content": "2024 年 1 月 BTC 现货 ETF 批准：批准前 3 个月 BTC 从 $27K 涨到 $47K（buy the rumor）。批准当天短暂冲高到 $49K 后回落到 $42K（sell the news）。之后 2 个月缓慢上涨到 $73K。教训：重大利好落地时不要追涨，等 sell the news 回调再入场。",
+    "category": "case",
+    "tags": "etf,btc,利好落地"
+  },
+  {
+    "title": "BTC 减半周期规律",
+    "content": "历史减半后行情：2012 减半 → 1 年后涨 80x。2016 减半 → 1.5 年后涨 30x。2020 减半 → 1 年后涨 8x。2024 减半 → 待观察（收益递减趋势）。规律：减半前 6 个月开始涨，减半后 3-6 个月可能横盘，之后开始主升浪。注意：每次周期的涨幅倍数在递减。",
+    "category": "case",
+    "tags": "btc,减半,周期"
+  },
+  {
+    "title": "山寨币轮动规律",
+    "content": "典型周期轮动：BTC 先涨 → ETH 跟涨 → 大市值山寨 → 小市值山寨 → Meme。BTC 市占率（dominance）上升时山寨承压，下降时山寨表现好。山寨季特征：BTC 横盘 + ETH/BTC 上涨 + 总市值扩张。交易策略：BTC 强势期只做 BTC/ETH，BTC 横盘期做山寨。",
+    "category": "market",
+    "tags": "山寨币,轮动,dominance"
+  },
+  {
+    "title": "Meme 币交易规则",
+    "content": "Meme 币本质是注意力经济。上涨靠叙事和社区热度，不靠基本面。入场时机：Twitter/TG 热度刚起 + 市值 <$10M + 合约安全（no honeypot）。退出规则：涨 2-3x 出本金，剩余仓位挂 trailing stop。绝不重仓（单笔 <1% 总资金）。大部分 meme 币 7 天内归零。",
+    "category": "market",
+    "tags": "meme,投机,风险"
+  },
+  {
+    "title": "DeFi 收益率陷阱",
+    "content": "APY > 100% 通常意味着高通胀代币排放或高风险。真实收益来源：交易手续费、借贷利差、MEV。虚假收益来源：代币排放（印钱分你，币价持续下跌）。评估 DeFi 收益：看 TVL 趋势（增长 vs 下降）、代币价格（是否持续贬值）、智能合约审计。",
+    "category": "market",
+    "tags": "defi,收益,风险"
+  },
+  {
+    "title": "杠杆使用原则",
+    "content": "杠杆不是用来放大收益的，是用来在确定性高的机会上提高资金效率。规则：只有 confidence >80% 的信号才用高杠杆（5-10x），60-80% 用低杠杆（2-3x），<60% 不用杠杆。止损必须设：杠杆越高止损越窄。永远不要让单笔亏损超过总资金的 3%。",
+    "category": "risk_rule",
+    "tags": "杠杆,风控,仓位"
+  },
+  {
+    "title": "止损设置方法论",
+    "content": "止损不是随便设的。技术止损：放在关键支撑/阻力下方（而不是固定百分比）。ATR 止损：止损 = 入场价 - 2x ATR（14周期）。时间止损：如果 N 小时后价格没有向预期方向移动 → 出场。移动止损：盈利后把止损移到成本价（保本），然后用 trailing stop 锁利润。",
+    "category": "risk_rule",
+    "tags": "止损,atr,风控"
+  },
+  {
+    "title": "Kelly Criterion 仓位管理",
+    "content": "Kelly 公式：f = (p*b - q) / b。p=胜率，q=1-p，b=盈亏比。实战中用 half-Kelly（f/2）更安全。Kelly 为负 = 不应该交易。Kelly > 25% 也不应该全部使用（cap at 25%）。需要至少 30 笔历史交易才能得到可靠的 Kelly 值。样本太少时用固定仓位（1-2% per trade）。",
+    "category": "risk_rule",
+    "tags": "kelly,仓位,量化"
+  },
+  {
+    "title": "新币上线交易策略",
+    "content": "新币上线初期（前 24-72 小时）：流动性差、波动极大。不要在第一个小时交易（价格发现阶段，spread 巨大）。等成交量稳定后再入场。做多信号：上线后回调 30-50% 后企稳 + 成交量回升。做空信号：上线冲高后放量下跌 + funding rate 极高。风险：新币容易被操控，小仓位试错。",
+    "category": "market",
+    "tags": "新币,上线,流动性"
+  },
+  {
+    "title": "加密市场时间规律",
+    "content": "UTC 时间：0-8 点（亚洲盘）波动低，8-16 点（欧洲盘）波动中，13-21 点（美盘）波动最大。重要时间：UTC 14:30 美国经济数据发布、UTC 18:00 美股收盘后资金流向加密。周末波动低但插针多。月初和月末合约交割日波动增大。尽量在美盘时段交易，亚洲盘做分析不做交易。",
+    "category": "market",
+    "tags": "时间,时段,波动率"
+  },
+  {
+    "title": "VIX 与加密市场关系",
+    "content": "VIX < 15 = 市场平静，risk-on，利好 BTC。VIX 15-25 = 正常波动。VIX 25-35 = 恐慌，BTC 通常跟跌。VIX > 35 = 极端恐慌，但可能是底部信号（恐慌峰值后反弹）。注意：VIX 飙升时 BTC 可能延迟反应 4-8 小时。VIX 持续低位 + 杠杆率高 = 暴风雨前的平静。",
+    "category": "indicator",
+    "tags": "vix,恐慌,相关性"
+  }
+]

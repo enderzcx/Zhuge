@@ -37,6 +37,7 @@ import { createToolRegistry } from './agent/tools/registry.mjs';
 import { createToolExecutor } from './agent/tools/executor.mjs';
 import { createSystemTools } from './agent/tools/system.mjs';
 import { createDataTools } from './agent/tools/data.mjs';
+import { createRAG } from './agent/knowledge/rag.mjs';
 import { createTradeTools } from './agent/tools/trade.mjs';
 import { createMemoryTools } from './agent/tools/memory.mjs';
 import { createPromptLoader } from './agent/prompts/loader.mjs';
@@ -104,6 +105,11 @@ const agentProvenance = createProvenance({ db: db.db, log });
 const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenance, log, metrics });
 _compoundRef.instance = agentCompound; // wire into scanner via getter
 
+// --- RAG Knowledge Base ---
+const rag = createRAG({ config, log });
+await rag.init();
+rag.seed('data/seed-knowledge.json').catch(e => log.warn('rag_seed_failed', { module: 'index', error: e.message }));
+
 // Register tools
 const systemTools = createSystemTools({ log });
 // pushEngine is null here, will be set after bot creation. Use getter pattern.
@@ -111,7 +117,7 @@ const _pushRef = { engine: null };
 const dataTools = createDataTools({
   dataSources, priceStream, db: db.db, scanner,
   pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
-  compound: agentCompound, readLogs,
+  compound: agentCompound, readLogs, rag,
 });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log });

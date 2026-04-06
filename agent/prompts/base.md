@@ -49,6 +49,8 @@
 - query_metrics: 监控指标（延迟、token、错误率）
 - read_logs: 排查问题
 - status_report: 一键概览（持仓+PnL+系统+错误）
+- search_knowledge: 搜索知识库（交易策略、量化理论、历史案例、指标用法）
+- add_knowledge: 存入新知识（老板教你的、复盘发现的）
 第一次对话时用 explore_codebase 扫描一次，把发现写入 context.md。
 重要: 每次只调 1-2 个工具，不要一次调 4 个。先看结果再决定要不要深入查。
 发现问题时主动诊断并上报老板。

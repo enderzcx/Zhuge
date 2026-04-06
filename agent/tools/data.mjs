@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 
-export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs }) {
+export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs, rag }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { priceCache } = priceStream;
 
@@ -137,6 +137,35 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         },
       },
       requiresConfirmation: false,
+    },
+    {
+      name: 'search_knowledge',
+      description: '搜索知识库 (交易策略/量化理论/历史案例/指标用法/风控规则)，语义检索',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜索内容 (如"Wyckoff 吸筹", "funding rate 极端值", "FOMC 影响")' },
+          category: { type: 'string', description: '按类别过滤: strategy/indicator/risk_rule/case/market (可选)' },
+          limit: { type: 'number', description: '返回条数 (默认5)' },
+        },
+        required: ['query'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'add_knowledge',
+      description: '向知识库添加新知识 (交易经验、策略笔记、市场规律)',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '标题' },
+          content: { type: 'string', description: '内容 (100-500字)' },
+          category: { type: 'string', description: '类别: strategy/indicator/risk_rule/case/market' },
+          tags: { type: 'string', description: '逗号分隔标签 (可选)' },
+        },
+        required: ['title', 'content', 'category'],
+      },
+      requiresConfirmation: true,
     },
   ];
 
@@ -466,6 +495,31 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           return true;
         });
         return filtered.map(e => `[${e.ts?.split('T')[1]?.slice(0, 8) || '?'}] ${e.level} ${e.event} ${e.module ? '(' + e.module + ')' : ''} ${e.error || ''}`).join('\n') || 'No matching logs';
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    },
+
+    async search_knowledge({ query, category, limit } = {}) {
+      if (!rag) return '{ "error": "Knowledge base not initialized" }';
+      if (!query) return '{ "error": "query required" }';
+      try {
+        const results = await rag.search(query, { limit: limit || 5, category });
+        if (results.length === 0) return `No results for "${query}"`;
+        return results.map(r =>
+          `[${r.category}] ${r.title} (score:${r.score})\n${r.content.slice(0, 300)}`
+        ).join('\n\n---\n\n');
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    },
+
+    async add_knowledge({ title, content, category, tags } = {}) {
+      if (!rag) return '{ "error": "Knowledge base not initialized" }';
+      if (!title || !content || !category) return '{ "error": "title, content, category required" }';
+      try {
+        await rag.add({ title, content, category, tags: tags || '', source: 'user' });
+        return `Added: "${title}" [${category}]`;
       } catch (err) {
         return `Error: ${err.message}`;
       }
