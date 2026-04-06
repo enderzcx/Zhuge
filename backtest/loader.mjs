@@ -55,9 +55,11 @@ export async function loadCandles(db, symbol, timeframe, startTs, endTs, log) {
       });
       insertMany(candles);
 
-      // Move cursor past the last candle
+      // Move cursor past the last candle — guard against stale data
       const maxTs = Math.max(...candles.map(c => parseInt(c[0])));
-      cursor = maxTs + tfMs;
+      const nextCursor = maxTs + tfMs;
+      if (nextCursor <= cursor) { cursor += tfMs * MAX_PER_REQUEST; continue; } // prevent infinite loop
+      cursor = nextCursor;
 
       _log.info('backtest_batch', { symbol, timeframe, loaded: candles.length, cursor: new Date(cursor).toISOString() });
     } catch (err) {

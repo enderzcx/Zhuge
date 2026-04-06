@@ -75,14 +75,21 @@ export function runBacktest({ db, symbol, timeframe, strategyId, startTs, endTs,
       usdtVolume: current.volume || 0,
     });
 
-    // Check TP/SL first
-    sim.checkPositions(current.high, current.ts); // check against high (intrabar)
-    sim.checkPositions(current.low, current.ts);  // check against low
+    // Check TP/SL — order matters: check adverse price first to avoid optimistic bias
+    // Long: check low (SL) before high (TP). Short: check high (SL) before low (TP).
+    const openSide = sim.positions[0]?.side;
+    if (openSide === 'long') {
+      sim.checkPositions(current.low, current.ts);
+      sim.checkPositions(current.high, current.ts);
+    } else if (openSide === 'short') {
+      sim.checkPositions(current.high, current.ts);
+      sim.checkPositions(current.low, current.ts);
+    }
 
-    const hasOpen = sim.positions.length > 0;
+    const hadPosition = sim.positions.length > 0;
 
     // Exit check (only if we have an open position)
-    if (hasOpen && exitConditions.length > 0) {
+    if (hadPosition && exitConditions.length > 0) {
       const exit = evaluateConditions(exitConditions, indicators, 'or');
       if (exit.met) {
         const pos = sim.positions[0];
@@ -92,8 +99,9 @@ export function runBacktest({ db, symbol, timeframe, strategyId, startTs, endTs,
       }
     }
 
-    // Entry check (only if no open position)
-    if (!hasOpen) {
+    // Entry check (only if no open position AND didn't just close one this candle)
+    const justClosed = hadPosition && sim.positions.length === 0;
+    if (!justClosed && sim.positions.length === 0) {
       const entry = evaluateConditions(entryConditions, indicators, 'and');
       if (entry.met && entry.score >= 0.8) {
         const side = direction === 'both'

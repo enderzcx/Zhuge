@@ -36,7 +36,10 @@ export function createSimulator({ initialBalance = 100, defaultLeverage = 10, ma
 
     const direction = pos.side === 'long' ? 1 : -1;
     const pnlPct = direction * (price - pos.entryPrice) / pos.entryPrice;
-    const pnl = pos.margin * pos.leverage * pnlPct;
+    let pnl = pos.margin * pos.leverage * pnlPct;
+
+    // Liquidation: can't lose more than margin (no negative equity per position)
+    if (pnl < -pos.margin) pnl = -pos.margin;
 
     balance += pos.margin + pnl;
     if (balance > peakBalance) peakBalance = balance;
