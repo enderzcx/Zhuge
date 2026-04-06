@@ -203,9 +203,9 @@ ${directives.slice(0, 400) || '(empty)'}
       _log.info('dream_complete', { module: 'dream', notes: notes.length, merged, deleted, created, duration_ms: Date.now() - start });
       _m.record('dream_run', 1, { notes: notes.length, merged, deleted, created });
 
-      const result = { notes: notes.length, merged, deleted, created, summary };
-    if (onComplete) try { onComplete(result); } catch {}
-    return result;
+      const dreamResult = { notes: notes.length, merged, deleted, created, summary };
+    if (onComplete) try { onComplete(dreamResult); } catch {}
+    return dreamResult;
     } catch (err) {
       _log.error('dream_error', { module: 'dream', error: err.message });
       return null;
