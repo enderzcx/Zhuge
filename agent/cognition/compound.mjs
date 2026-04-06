@@ -81,16 +81,34 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       hold_duration_min: t.hold_duration_min,
     }));
 
+    // Load recent veto decisions — analyst signals that risk rejected
+    let vetoData = [];
+    try {
+      const vetoes = db.prepare(
+        "SELECT timestamp, confidence, output_summary FROM decisions WHERE agent = 'risk' AND action = 'veto' AND timestamp > datetime('now', '-7 days') ORDER BY timestamp DESC LIMIT 20"
+      ).all();
+      vetoData = vetoes.map(v => ({
+        timestamp: v.timestamp,
+        confidence: v.confidence,
+        reason: (v.output_summary || '').slice(0, 150),
+      }));
+    } catch {}
+
+    const vetoSection = vetoData.length > 0
+      ? `\n最近 ${vetoData.length} 次被 Risk Agent 否决的信号:\n${JSON.stringify(vetoData, null, 1)}\n`
+      : '';
+
     const prompt = `你是一个交易复盘专家。以下是最近 ${trades.length} 笔交易的完整数据:
 
 ${JSON.stringify(tradeData, null, 1)}
-
+${vetoSection}
 ${existingRules.length > 0 ? `\n当前已有规则:\n${JSON.stringify(existingRules, null, 1)}\n` : ''}
 请分析:
 1. 赢的交易有什么共同点? 亏的呢?
 2. 有没有应该避免的条件组合?
 3. 有没有表现特别好的条件?
 4. 已有规则是否需要更新或废弃?
+5. Risk Agent 连续否决信号的模式: analyst 是否在持续产出低质量信号? 还是 risk 阈值过于保守? 给出具体建议。
 
 输出 JSON 数组, 每条规则:
 {
