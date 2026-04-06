@@ -401,7 +401,7 @@ ${numbered}
       `Merged: ${result.merged} | Deleted: ${result.deleted} | Created: ${result.created}`,
       result.summary || '',
     ];
-    await _send(lines.join('\n'), topics.system);
+    await _send(lines.join('\n'), 'system');
   }
 
   return { start, stop, postPositions, postObserve, postCompound, postDream, postPnLChart, checkTgUrgent, postNewsDigest };
