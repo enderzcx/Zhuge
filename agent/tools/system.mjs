@@ -171,7 +171,7 @@ export function createSystemTools({ log }) {
       try {
         // Docker container status
         const container = execSync(
-          "sudo docker ps --filter name=codex-proxy --format '{{.Status}} | Image: {{.Image}} | Ports: {{.Ports}}'",
+          "docker ps --filter name=codex-proxy --format '{{.Status}} | Image: {{.Image}} | Ports: {{.Ports}}'",
           { encoding: 'utf-8', timeout: 5000 }
         ).trim();
 

@@ -67,6 +67,26 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
   }
 
   /**
+   * Load active compound strategies from DB.
+   */
+  function _loadCompoundStrategies() {
+    try {
+      const strategies = db.prepare(
+        "SELECT strategy_id, name, direction, symbols, confidence, evidence_json FROM compound_strategies WHERE status = 'active' ORDER BY confidence DESC LIMIT 5"
+      ).all();
+      if (strategies.length === 0) return '';
+
+      const lines = strategies.map(s => {
+        const syms = JSON.parse(s.symbols || '[]').join(',') || 'any';
+        const ev = JSON.parse(s.evidence_json || '{}');
+        const perf = ev.sample_size > 0 ? ` | 胜率${((ev.win_rate || 0) * 100).toFixed(0)}% (${ev.sample_size}笔)` : '';
+        return `[${s.direction}] ${s.name} → ${syms} (conf:${(s.confidence * 100).toFixed(0)}%${perf})`;
+      });
+      return `\n\n## 活跃 AI 策略 (AI 自主生成, 自动执行中)\n${lines.join('\n')}`;
+    } catch { return ''; }
+  }
+
+  /**
    * Load Crucix delta + TG urgent into prompt (what changed + breaking alerts).
    */
   async function _loadLiveContext() {
@@ -135,6 +155,7 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
       directives,
       bootstrap,
       _loadCompoundRules(),
+      _loadCompoundStrategies(),
       liveCtx,
       _loadPushContext(),
       _loadContext(),

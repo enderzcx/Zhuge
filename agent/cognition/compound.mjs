@@ -11,6 +11,19 @@
 const COMPOUND_THRESHOLD = 10; // trades since last compound
 const MIN_TRADES_FOR_COMPOUND = 5;
 
+// Bounds for AI-generated strategy parameters
+const STRATEGY_BOUNDS = {
+  margin_usdt: [0.5, 10],
+  leverage: [1, 20],
+  kelly_fraction_cap: [0.05, 0.3],
+  sl_pct: [0.005, 0.1],
+  tp_pct: [0.01, 0.15],
+  max_hold_minutes: [5, 1440],
+};
+
+const VALID_OPERATORS = new Set(['gt', 'lt', 'gte', 'lte', 'eq', 'between', 'in']);
+const VALID_DIRECTIONS = new Set(['long', 'short', 'both']);
+
 export function createCompound({ db, llm, provenance, log, metrics }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
@@ -121,7 +134,34 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       ).all();
     } catch {}
 
-    // 5. System errors
+    // 5. Strategy performance (trades linked to compound strategies)
+    let strategyPerf = [];
+    try {
+      const activeStrats = db.prepare("SELECT strategy_id, name, confidence, evidence_json FROM compound_strategies WHERE status = 'active'").all();
+      for (const s of activeStrats) {
+        const stratTrades = db.prepare("SELECT pnl, pnl_pct FROM trades WHERE strategy_id = ? AND status = 'closed'").all(s.strategy_id);
+        const wins = stratTrades.filter(t => t.pnl > 0).length;
+        const totalPnl = stratTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+        const winRate = stratTrades.length > 0 ? wins / stratTrades.length : 0;
+
+        // Update evidence in DB
+        const evidence = { win_rate: winRate, sample_size: stratTrades.length, pnl_total: totalPnl, wins, losses: stratTrades.length - wins };
+        try { db.prepare('UPDATE compound_strategies SET evidence_json = ? WHERE strategy_id = ?').run(JSON.stringify(evidence), s.strategy_id); } catch {}
+
+        // Auto-retire losing strategies: 5+ trades, win rate < 30%
+        if (stratTrades.length >= 5 && winRate < 0.3) {
+          try {
+            db.prepare("UPDATE compound_strategies SET status = 'retired', retired_at = datetime('now'), retired_reason = ? WHERE strategy_id = ?")
+              .run(`auto: ${stratTrades.length} trades, ${(winRate * 100).toFixed(0)}% win rate`, s.strategy_id);
+            _log.info('strategy_auto_retired', { module: 'compound', strategy_id: s.strategy_id, trades: stratTrades.length, winRate });
+          } catch {}
+        }
+
+        strategyPerf.push({ id: s.strategy_id, name: s.name, trades: stratTrades.length, wins, pnl: totalPnl.toFixed(2), winRate: (winRate * 100).toFixed(0) + '%' });
+      }
+    } catch {}
+
+    // 6. System errors
     let errorCount = 0;
     try {
       const r = db.prepare("SELECT COALESCE(SUM(value),0) as total FROM metrics WHERE name='error_count' AND ts > ?").get(Date.now() - 7 * 86400000);
@@ -136,6 +176,7 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       momentumFunnel ? `Momentum漏斗 (7天): 发现${momentumFunnel.discovered}币 → 值得交易${momentumFunnel.trade_worthy} → 实际交易${momentumFunnel.traded}` : '',
       analystActions.length > 0 ? `Analyst 行动分布 (7天):\n${analystActions.map(a => `  ${a.recommended_action}: ${a.cnt}次, 平均confidence ${a.avg_conf}`).join('\n')}` : '',
       errorCount > 0 ? `系统错误: ${errorCount}次 (7天)` : '',
+      strategyPerf.length > 0 ? `AI 策略表现:\n${strategyPerf.map(s => `  ${s.name} (${s.id}): ${s.trades}笔, 胜率${s.winRate}, PnL ${s.pnl} USDT`).join('\n')}` : '',
     ].filter(Boolean).join('\n\n');
 
     const prompt = `你是一个交易系统复盘专家。你要复盘的不只是交易结果，还有整个决策流程和系统表现。
@@ -175,15 +216,52 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
 规则要具体可执行，不要泛泛而谈。基于数据，不要编造。
 最多 8 条规则。如果已有规则仍然有效，保持其 rule_id 不变并更新 evidence。
 要废弃的旧规则设 status: "superseded"。
-仅输出 JSON 数组，不要其他文字。`;
+除了规则外，你还可以生成完整的交易策略。策略比规则更具体：包含入场条件、出场条件、仓位管理。
+
+输出格式:
+{
+  "rules": [ ... 规则数组，格式同上 ... ],
+  "strategies": [
+    {
+      "strategy_id": "unique_snake_case",
+      "name": "策略中文名",
+      "description": "策略逻辑描述和依据",
+      "direction": "long | short | both",
+      "symbols": ["ETHUSDT"],
+      "timeframe": "any | asia_session | us_session",
+      "entry_conditions": [
+        { "type": "indicator", "field": "rsi_14", "operator": "lt", "value": 30, "description": "RSI超卖" }
+      ],
+      "exit_conditions": [
+        { "type": "indicator", "field": "rsi_14", "operator": "gt", "value": 70, "description": "RSI超买" }
+      ],
+      "sizing": { "margin_usdt": 3, "leverage": 8 },
+      "risk_params": { "sl_pct": 0.03, "tp_pct": 0.06, "max_hold_minutes": 480 },
+      "confidence": 0.7,
+      "evidence": "支撑依据",
+      "status": "proposed | active | superseded"
+    }
+  ]
+}
+
+可用的条件 field: rsi_14, funding_rate, volume_ratio, change_24h, ma_20, ma_50, bb_position, bb_width, hour_utc, trend, support_20, resistance_20, price
+可用的 operator: gt, lt, gte, lte, eq, between, in
+entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用 OR 逻辑（任一满足就出场）。
+
+策略要基于数据（trade patterns, veto patterns, signal accuracy），不要凭空编造。
+每个策略至少 2 个入场条件，至少 1 个出场条件。
+最多 3 个新策略。已有策略表现差（胜率<30%且>=5笔）应设 status: "superseded"。
+
+如果你觉得当前数据不足以支撑完整策略，可以只输出 rules 不输出 strategies。
+仅输出 JSON，不要其他文字。`;
 
     const start = Date.now();
     let result;
     try {
       result = await llm([
-        { role: 'system', content: '你是交易复盘专家。只输出 JSON 数组。' },
+        { role: 'system', content: '你是交易复盘专家。输出 JSON 对象 { "rules": [...], "strategies": [...] }。如果没有策略要生成，strategies 可以为空数组。' },
         { role: 'user', content: prompt },
-      ], { max_tokens: 1000, timeout: 60000 });
+      ], { max_tokens: 2000, timeout: 90000 });
     } catch (err) {
       _log.error('compound_llm_failed', { module: 'compound', error: err.message });
       _m.record('error_count', 1, { module: 'compound', type: 'llm' });
@@ -192,12 +270,20 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
 
     _m.record('llm_latency_ms', Date.now() - start, { module: 'compound' });
 
-    // Parse rules
-    let rules;
+    // Parse output — supports both old (array of rules) and new ({ rules, strategies })
+    let rules = [];
+    let strategies = [];
     try {
       const content = (result.content || result).replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      rules = JSON.parse(content);
-      if (!Array.isArray(rules)) throw new Error('Not an array');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        rules = parsed; // backward compat: plain array = rules only
+      } else if (parsed && typeof parsed === 'object') {
+        rules = Array.isArray(parsed.rules) ? parsed.rules : [];
+        strategies = Array.isArray(parsed.strategies) ? parsed.strategies : [];
+      } else {
+        throw new Error('Unexpected format');
+      }
     } catch (err) {
       _log.error('compound_parse_failed', { module: 'compound', error: err.message, raw: (result.content || '').slice(0, 200) });
       return null;
@@ -248,6 +334,58 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
       }
     }
 
+    // --- Strategy persistence ---
+    let strategiesCreated = 0, strategiesUpdated = 0, strategiesRetired = 0;
+    const strategyUpsert = db.prepare(`
+      INSERT INTO compound_strategies (strategy_id, name, description, direction, symbols, timeframe, entry_conditions, exit_conditions, sizing_json, risk_params_json, status, confidence, source_compound_run)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(strategy_id) DO UPDATE SET
+        name = excluded.name, description = excluded.description, direction = excluded.direction,
+        symbols = excluded.symbols, entry_conditions = excluded.entry_conditions,
+        exit_conditions = excluded.exit_conditions, sizing_json = excluded.sizing_json,
+        risk_params_json = excluded.risk_params_json, status = excluded.status,
+        confidence = excluded.confidence, source_compound_run = excluded.source_compound_run
+    `);
+
+    for (const s of strategies) {
+      if (!s.strategy_id || !s.name || !_validateStrategy(s)) {
+        _log.warn('compound_strategy_invalid', { module: 'compound', strategy_id: s.strategy_id, reason: 'validation failed' });
+        continue;
+      }
+      try {
+        const existing = db.prepare('SELECT id, status FROM compound_strategies WHERE strategy_id = ?').get(s.strategy_id);
+        const sizing = _clampStrategyParams(s.sizing || {}, STRATEGY_BOUNDS);
+        const risk = _clampStrategyParams(s.risk_params || {}, STRATEGY_BOUNDS);
+        const status = s.status === 'superseded' ? 'retired' : (s.confidence >= 0.7 ? 'active' : 'proposed');
+
+        strategyUpsert.run(
+          s.strategy_id, s.name, s.description || '',
+          VALID_DIRECTIONS.has(s.direction) ? s.direction : 'long',
+          JSON.stringify(s.symbols || []),
+          s.timeframe || 'any',
+          JSON.stringify(s.entry_conditions || []),
+          JSON.stringify(s.exit_conditions || []),
+          JSON.stringify(sizing),
+          JSON.stringify(risk),
+          status, s.confidence || 0.5, compoundId,
+        );
+
+        if (s.status === 'superseded' || status === 'retired') strategiesRetired++;
+        else if (existing) strategiesUpdated++;
+        else strategiesCreated++;
+      } catch (err) {
+        _log.warn('compound_strategy_insert_failed', { module: 'compound', strategy_id: s.strategy_id, error: err.message });
+      }
+    }
+
+    // Auto-activate proposed strategies that survived 1+ compound cycles (>2h old)
+    try {
+      const promoted = db.prepare(
+        "UPDATE compound_strategies SET status = 'active', activated_at = datetime('now') WHERE status = 'proposed' AND created_at < datetime('now', '-2 hours')"
+      ).run();
+      if (promoted.changes > 0) _log.info('strategies_auto_activated', { module: 'compound', count: promoted.changes });
+    } catch {}
+
     // Update run stats
     db.prepare('UPDATE compound_runs SET rules_generated = ?, rules_updated = ?, rules_deprecated = ? WHERE id = ?')
       .run(generated, updated, deprecated, compoundId);
@@ -256,11 +394,12 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
       module: 'compound',
       trades: trades.length,
       generated, updated, deprecated,
+      strategies_created: strategiesCreated, strategies_updated: strategiesUpdated, strategies_retired: strategiesRetired,
       duration_ms: Date.now() - start,
     });
-    _m.record('compound_run', 1, { trades: trades.length, rules: generated + updated });
+    _m.record('compound_run', 1, { trades: trades.length, rules: generated + updated, strategies: strategiesCreated + strategiesUpdated });
 
-    return { trades: trades.length, generated, updated, deprecated };
+    return { trades: trades.length, generated, updated, deprecated, strategiesCreated, strategiesUpdated, strategiesRetired };
   }
 
   /**
@@ -314,5 +453,46 @@ param_changes 是可选的，用于直接修改执行参数（只有你非常有
     } catch { return {}; }
   }
 
-  return { shouldRun, run, getActiveRules, getParamOverrides };
+  /**
+   * Validate a strategy object from LLM output.
+   */
+  function _validateStrategy(s) {
+    if (!s.entry_conditions?.length || s.entry_conditions.length < 2) return false;
+    if (!s.exit_conditions?.length) return false;
+    if (!VALID_DIRECTIONS.has(s.direction || '')) return false;
+    for (const c of [...(s.entry_conditions || []), ...(s.exit_conditions || [])]) {
+      if (!c.field || !VALID_OPERATORS.has(c.operator)) return false;
+      if (c.operator === 'between' && (c.value === undefined || c.value2 === undefined)) return false;
+    }
+    return true;
+  }
+
+  function _clampStrategyParams(params, bounds) {
+    const clamped = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (bounds[k] && typeof v === 'number') {
+        clamped[k] = Math.min(Math.max(v, bounds[k][0]), bounds[k][1]);
+      } else {
+        clamped[k] = v;
+      }
+    }
+    return clamped;
+  }
+
+  /**
+   * Get active compound strategies.
+   */
+  function getActiveStrategies() {
+    try {
+      return db.prepare("SELECT * FROM compound_strategies WHERE status = 'active' ORDER BY confidence DESC").all();
+    } catch { return []; }
+  }
+
+  function getProposedStrategies() {
+    try {
+      return db.prepare("SELECT * FROM compound_strategies WHERE status = 'proposed' ORDER BY created_at DESC").all();
+    } catch { return []; }
+  }
+
+  return { shouldRun, run, getActiveRules, getParamOverrides, getActiveStrategies, getProposedStrategies };
 }

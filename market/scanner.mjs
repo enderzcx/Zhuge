@@ -303,6 +303,13 @@ Rules:
     // Compound param overrides (AI-decided parameters)
     const _overrides = compound?.getParamOverrides?.() || {};
 
+    // Load active compound strategies that target momentum symbols
+    let activeStrategies = [];
+    try {
+      activeStrategies = db.prepare("SELECT * FROM compound_strategies WHERE status = 'active'")
+        .all().map(s => ({ ...s, symbols: JSON.parse(s.symbols || '[]'), risk_params: JSON.parse(s.risk_params_json || '{}'), sizing: JSON.parse(s.sizing_json || '{}') }));
+    } catch {}
+
     // 1. Discover
     const candidates = await discoverNewCoins();
     if (!candidates.length) return;
@@ -370,9 +377,13 @@ Rules:
         }
 
         // 5. Execute if TRADE verdict + score threshold
+        // Check if a compound strategy targets this symbol — use its risk params
+        const matchingStrat = activeStrategies.find(s =>
+          s.symbols.includes(candidate.symbol) && (s.direction === report.direction || s.direction === 'both')
+        );
         const minScore = _overrides.min_score || MOMENTUM.min_score;
         if (report.verdict === 'TRADE' && report.total_score >= minScore && report.direction) {
-          const traded = await executeMomentumTrade(candidate.symbol, report);
+          const traded = await executeMomentumTrade(candidate.symbol, report, matchingStrat);
           if (traded) {
             slotsAvailable--;
             if (candidateRow) markCandidateTraded.run(candidateRow.id);
@@ -387,7 +398,7 @@ Rules:
   /**
    * Execute a momentum trade based on research report.
    */
-  async function executeMomentumTrade(symbol, report) {
+  async function executeMomentumTrade(symbol, report, matchingStrategy = null) {
     if (!tradingLock || !tradingLock.acquire()) {
       _log.info('trading_lock_active', { module: 'momentum' });
       return false;
@@ -399,14 +410,17 @@ Rules:
       const holdSide = isBuy ? 'long' : 'short';
 
       // Apply compound param overrides (AI-decided parameters)
+      // Strategy-specific params take priority over global overrides
       const overrides = compound?.getParamOverrides?.() || {};
-      const leverage = String(overrides.leverage || MOMENTUM.leverage);
+      const stratSizing = matchingStrategy?.sizing || {};
+      const stratRisk = matchingStrategy?.risk_params || {};
+      const leverage = String(stratSizing.leverage || overrides.leverage || MOMENTUM.leverage);
 
       // Check balance
       const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
       const usdtBal = accounts?.find(a => a.marginCoin === 'USDT');
       const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
-      const marginPerTrade = overrides.margin_per_trade || MOMENTUM.margin_per_trade;
+      const marginPerTrade = stratSizing.margin_usdt || overrides.margin_per_trade || MOMENTUM.margin_per_trade;
       if (available < marginPerTrade) {
         _log.info('insufficient_margin', { module: 'momentum', available, required: marginPerTrade });
         return false;
@@ -450,9 +464,9 @@ Rules:
         side, tradeSide: 'open', orderType: 'market', size,
       };
 
-      // TP/SL — compound overrides or defaults
-      const tpPct = overrides.tp_pct || 0.03;
-      const slPct = overrides.sl_pct || 0.015;
+      // TP/SL — strategy params → compound overrides → defaults
+      const tpPct = stratRisk.tp_pct || overrides.tp_pct || 0.03;
+      const slPct = stratRisk.sl_pct || overrides.sl_pct || 0.015;
       const tpRaw = isBuy ? currentPrice * (1 + tpPct) : currentPrice * (1 - tpPct);
       const slRaw = isBuy ? currentPrice * (1 - slPct) : currentPrice * (1 + slPct);
       const tp = await roundPrice(symbol, tpRaw);
@@ -464,13 +478,16 @@ Rules:
       const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
       const orderId = order?.orderId;
 
-      _log.info('momentum_trade', { module: 'momentum', side: holdSide, size, symbol, leverage, price: currentPrice, score: report.total_score, sl, tp, orderId });
+      _log.info('momentum_trade', { module: 'momentum', side: holdSide, size, symbol, leverage, price: currentPrice, score: report.total_score, sl, tp, orderId, strategy: matchingStrategy?.strategy_id || null });
 
       // Record trade
       const tradeId = `res_${orderId || Date.now()}`;
       insertTrade.run(tradeId, 'bitget', symbol, side, currentPrice, parseFloat(size), 0,
         parseInt(leverage), 'open', orderId || '', JSON.stringify(report),
-        `Momentum: score ${report.total_score}, ${report.reasoning?.slice(0, 100)}`, new Date().toISOString());
+        `Momentum: score ${report.total_score}${matchingStrategy ? ' strat:' + matchingStrategy.strategy_id : ''}, ${report.reasoning?.slice(0, 100)}`, new Date().toISOString());
+      if (matchingStrategy) {
+        try { db.prepare('UPDATE trades SET strategy_id = ? WHERE trade_id = ?').run(matchingStrategy.strategy_id, tradeId); } catch {}
+      }
 
       insertDecision.run(new Date().toISOString(), 'researcher', 'momentum_trade', 'place-order',
         JSON.stringify({ symbol, side, size, leverage, score: report.total_score }),

@@ -277,6 +277,31 @@ export function createDB() {
     CREATE INDEX IF NOT EXISTS idx_prov_trade ON decision_provenance(trade_id);
     CREATE INDEX IF NOT EXISTS idx_prov_symbol ON decision_provenance(symbol, created_at);
 
+    -- Compound strategies: AI-generated full trading strategies (Phase 3)
+    CREATE TABLE IF NOT EXISTS compound_strategies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      strategy_id TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'long',
+      symbols TEXT NOT NULL DEFAULT '[]',
+      timeframe TEXT DEFAULT 'any',
+      entry_conditions TEXT NOT NULL DEFAULT '[]',
+      exit_conditions TEXT NOT NULL DEFAULT '[]',
+      sizing_json TEXT NOT NULL DEFAULT '{}',
+      risk_params_json TEXT DEFAULT '{}',
+      status TEXT DEFAULT 'proposed',
+      confidence REAL DEFAULT 0.5,
+      evidence_json TEXT DEFAULT '{}',
+      source_compound_run INTEGER,
+      created_at TEXT DEFAULT (datetime('now')),
+      activated_at TEXT,
+      retired_at TEXT,
+      retired_reason TEXT,
+      superseded_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cs_status ON compound_strategies(status);
+
     -- Compound rules: AI-discovered trading patterns (agent/cognition/compound.mjs)
     CREATE TABLE IF NOT EXISTS compound_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,8 +337,9 @@ export function createDB() {
     INSERT INTO analysis (mode, result_json, macro_risk_score, crypto_sentiment, stock_sentiment, technical_bias, recommended_action, confidence, push_worthy, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  // Add leverage column if it doesn't exist (migration for existing DBs)
+  // Migrations for existing DBs
   try { db.exec('ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1'); } catch {}
+  try { db.exec('ALTER TABLE trades ADD COLUMN strategy_id TEXT'); } catch {}
 
   const insertTrade = db.prepare(`
     INSERT INTO trades (trade_id, source, pair, side, entry_price, amount, amount_out, leverage, status, tx_hash, signal_snapshot, decision_reasoning, opened_at)
@@ -422,6 +448,25 @@ export function createDB() {
   `);
   const markCandidateTraded = db.prepare(`UPDATE coin_candidates SET traded = 1 WHERE id = ?`);
 
+  // --- Compound strategies ---
+  const insertCompoundStrategy = db.prepare(`
+    INSERT INTO compound_strategies (strategy_id, name, description, direction, symbols, timeframe, entry_conditions, exit_conditions, sizing_json, risk_params_json, status, confidence, source_compound_run)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(strategy_id) DO UPDATE SET
+      name = excluded.name, description = excluded.description, direction = excluded.direction,
+      symbols = excluded.symbols, entry_conditions = excluded.entry_conditions,
+      exit_conditions = excluded.exit_conditions, sizing_json = excluded.sizing_json,
+      risk_params_json = excluded.risk_params_json, status = excluded.status,
+      confidence = excluded.confidence, source_compound_run = excluded.source_compound_run
+  `);
+  const updateCompoundStrategyStatus = db.prepare(`
+    UPDATE compound_strategies SET status = ?, activated_at = CASE WHEN ? = 'active' THEN datetime('now') ELSE activated_at END,
+    retired_at = CASE WHEN ? = 'retired' THEN datetime('now') ELSE retired_at END, retired_reason = ? WHERE strategy_id = ?
+  `);
+  const updateCompoundStrategyEvidence = db.prepare(`
+    UPDATE compound_strategies SET evidence_json = ? WHERE strategy_id = ?
+  `);
+
   const insertPush = db.prepare(`
     INSERT INTO push_history (push_id, level, text, url, analysis_json, raw_news_json, reasoning, trace_id, pushed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -438,6 +483,7 @@ export function createDB() {
     getActiveGroup, getGroupLevels, getLastAbandonedTime, getAllActiveGroups,
     persistNews, persistAnalysis, persistPatrol,
     insertCandidate, updateCandidateResearch, markCandidateTraded,
+    insertCompoundStrategy, updateCompoundStrategyStatus, updateCompoundStrategyEvidence,
     insertPush,
   };
 }

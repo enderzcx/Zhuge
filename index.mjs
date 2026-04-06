@@ -86,7 +86,7 @@ const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
   stock:  { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
 };
-const strategist = createStrategist({ db, agentRunner, messageBus, cache, log });
+const strategist = createStrategist({ db, agentRunner, messageBus, cache, log, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {}, getActiveStrategies: () => _compoundRef.instance?.getActiveStrategies() || [] }, bitgetClient, indicators });
 const telegram = createTelegram({ db, config, agentMetrics: agentRunner.agentMetrics, cache });
 const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram, log });
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close

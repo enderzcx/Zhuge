@@ -56,12 +56,19 @@ export function createTGStream(chatId, tgCall) {
   function formatOutput(text) {
     if (!text) return '\\.\\.\\.';
 
-    // Split by code blocks, escape non-code parts
-    const parts = text.split(/(```[\s\S]*?```)/);
-    const formatted = parts.map(part => {
-      if (part.startsWith('```')) return part; // code blocks as-is
-      return escapeMarkdown(part);
-    }).join('');
+    // Split by code blocks (greedy match to handle nested backticks)
+    const parts = [];
+    let remaining = text;
+    while (remaining.length > 0) {
+      const openIdx = remaining.indexOf('```');
+      if (openIdx === -1) { parts.push({ code: false, text: remaining }); break; }
+      if (openIdx > 0) parts.push({ code: false, text: remaining.slice(0, openIdx) });
+      const closeIdx = remaining.indexOf('```', openIdx + 3);
+      if (closeIdx === -1) { parts.push({ code: false, text: remaining.slice(openIdx) }); break; }
+      parts.push({ code: true, text: remaining.slice(openIdx, closeIdx + 3) });
+      remaining = remaining.slice(closeIdx + 3);
+    }
+    const formatted = parts.map(p => p.code ? p.text : escapeMarkdown(p.text)).join('');
 
     return formatted || '\\.\\.\\.';
   }

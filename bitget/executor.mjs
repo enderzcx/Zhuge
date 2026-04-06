@@ -113,7 +113,10 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     const rawSymbol = (signal.symbol || 'ETHUSDT').toUpperCase();
     const symbol = SUPPORTED_SYMBOLS.includes(rawSymbol) ? rawSymbol : 'ETHUSDT';
     if (rawSymbol !== symbol) _log.warn('unknown_symbol', { module: 'bitget_exec', rawSymbol: signal.symbol, fallback: symbol });
-    const leverage = String(config.SCALING?.leverage || config.MOMENTUM?.leverage || 10);
+
+    // Strategy-specific params override defaults
+    const stratParams = signal.strategy_id ? (signal.params || signal) : {};
+    const leverage = String(stratParams.leverage || config.SCALING?.leverage || config.MOMENTUM?.leverage || 10);
 
     // Smart order type: confidence >= 80 → market, 60-80 → limit
     const useLimit = confidence >= 60 && confidence < 80;
@@ -175,13 +178,23 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         return;
       }
 
-      // Dynamic Kelly position sizing (per-symbol)
-      const kellySize = calculateKellySize(available, symbol, currentPrice);
-      if (kellySize <= 0) {
-        _log.info('kelly_zero', { module: 'bitget_exec', symbol });
-        return;
+      // Position sizing: strategy-specific margin OR Kelly criterion
+      let size;
+      if (stratParams.margin_usdt) {
+        if (available < stratParams.margin_usdt) {
+          _log.info('insufficient_for_strategy', { module: 'bitget_exec', available: available.toFixed(2), required: stratParams.margin_usdt, strategy: signal.strategy_id });
+          return;
+        }
+        const notional = stratParams.margin_usdt * parseFloat(leverage);
+        size = String(Math.max(0.01, parseFloat((notional / currentPrice).toFixed(4))));
+      } else {
+        const kellySize = calculateKellySize(available, symbol, currentPrice);
+        if (kellySize <= 0) {
+          _log.info('kelly_zero', { module: 'bitget_exec', symbol });
+          return;
+        }
+        size = String(kellySize);
       }
-      const size = String(kellySize);
 
       // Set leverage
       await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
@@ -208,7 +221,17 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         orderParams.price = String(await roundPrice(symbol, limitPrice));
       }
 
-      // Attach TP/SL from analyst signal — validate direction
+      // Attach TP/SL: strategy params → analyst signal → none
+      // Strategy risk params (percentage-based)
+      if (!signal.take_profit && !signal.stop_loss && (stratParams.tp_pct || stratParams.sl_pct)) {
+        const tpPct = stratParams.tp_pct || 0.03;
+        const slPct = stratParams.sl_pct || 0.015;
+        const tpRaw = isBuy ? currentPrice * (1 + tpPct) : currentPrice * (1 - tpPct);
+        const slRaw = isBuy ? currentPrice * (1 - slPct) : currentPrice * (1 + slPct);
+        orderParams.presetStopSurplusPrice = String(await roundPrice(symbol, tpRaw));
+        orderParams.presetStopLossPrice = String(await roundPrice(symbol, slRaw));
+      }
+      // Analyst signal (absolute price)
       if (signal.take_profit && signal.stop_loss) {
         const tp = parseFloat(signal.take_profit);
         const sl = parseFloat(signal.stop_loss);
@@ -230,11 +253,16 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       metrics?.record('trade_execution', 1, { symbol, side, orderType });
 
       // Record trade
+      const tradeIdStr = `bg_${orderId}`;
       insertTrade.run(
-        `bg_${orderId}`, 'bitget', symbol, side, useLimit ? parseFloat(orderParams.price) : 0, parseFloat(size), 0,
+        tradeIdStr, 'bitget', symbol, side, useLimit ? parseFloat(orderParams.price) : 0, parseFloat(size), 0,
         parseInt(leverage, 10), 'open', orderId || '', JSON.stringify(signal),
-        `${action} conf:${confidence} ${orderType}`, new Date().toISOString()
+        `${action} conf:${confidence} ${orderType}${signal.strategy_id ? ' strat:' + signal.strategy_id : ''}`, new Date().toISOString()
       );
+      // Link trade to compound strategy (if triggered by one)
+      if (signal.strategy_id) {
+        try { db.prepare('UPDATE trades SET strategy_id = ? WHERE trade_id = ?').run(signal.strategy_id, tradeIdStr); } catch {}
+      }
 
       insertDecision.run(new Date().toISOString(), 'executor', 'bitget_trade', 'place-order',
         JSON.stringify({ symbol, side, size, leverage, orderType, price: orderParams.price || 'market' }),

@@ -25,7 +25,7 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, bi
   const { scoreHistoricalSignals, updateSourceScores } = signals;
   const { fetchCrucix, fetchNews } = dataSources;
   const { sendTelegramAlert, checkAlerts } = telegram;
-  const { persistNews, persistAnalysis, persistPatrol, insertDecision } = db;
+  const { persistNews, persistAnalysis, persistPatrol, insertDecision, insertAnalysis } = db;
 
   const bus = messageBus || { postMessage: () => {} };
 
@@ -152,8 +152,25 @@ Output ONLY the JSON, no other text.`;
       const sentimentVal = parsed[sentimentKey] || 0;
       log.info('analyst_result', { module: 'pipeline', mode, cycleId, risk: parsed.macro_risk_score, sentiment: sentimentVal, bias: parsed.technical_bias, action: parsed.recommended_action, push: parsed.push_worthy, tools: analystResult.toolCalls.length });
 
-      // Persist to SQLite
-      persistAnalysis(mode, parsed, now);
+      // Persist to SQLite (atomic: analysis + decision in one transaction)
+      const _decisionArgs = [now, 'analyst', 'analyze', '', '', JSON.stringify(parsed),
+        `${mode} market analysis`, analystResult.content.slice(0, 500), '', parsed.confidence || 0, null];
+      if (db.db?.transaction) {
+        try {
+          db.db.transaction(() => {
+            // No try-catch inside — let errors propagate to trigger rollback
+            insertAnalysis.run(mode, JSON.stringify(parsed), parsed.macro_risk_score || 0,
+              parsed.crypto_sentiment || 0, parsed.stock_sentiment || 0,
+              parsed.technical_bias || 'neutral', parsed.recommended_action || 'hold',
+              parsed.confidence || 0, parsed.push_worthy ? 1 : 0, now);
+            insertDecision.run(..._decisionArgs);
+          })();
+        } catch (e) { log.error('pipeline_txn_failed', { module: 'pipeline', error: e.message }); }
+      } else {
+        persistAnalysis(mode, parsed, now);
+        try { insertDecision.run(..._decisionArgs); }
+        catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
+      }
 
       // Smart Push: if analyst says push_worthy, send to owner via TG
       if (parsed.push_worthy && pushEngine) {
@@ -171,12 +188,6 @@ Output ONLY the JSON, no other text.`;
         pushEngine.pushFlash({ analysis: parsed, news: allNews, traceId })
           .catch(err => log.error('push_flash_error', { module: 'pipeline', error: err.message }));
       }
-
-      // Record analyst final decision
-      try {
-        insertDecision.run(now, 'analyst', 'analyze', '', '', JSON.stringify(parsed),
-          `${mode} market analysis`, analystResult.content.slice(0, 500), '', parsed.confidence || 0, null);
-      } catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
 
       // Post analyst result to message bus
       bus.postMessage('analyst', 'risk', 'SIGNAL_UPDATE', parsed, traceId);
@@ -220,9 +231,52 @@ Output ONLY the JSON, no other text.`;
         }
       }
 
-      // --- Strategist Agent (crypto only, evaluate active strategies) ---
+      // --- Strategist Agent (crypto only, evaluate compound + manual strategies) ---
       if (mode === 'crypto') {
-        runStrategistCheck(parsed, traceId).catch(err => log.error('strategist_error', { module: 'pipeline', error: err.message }));
+        try {
+          const stratResult = await runStrategistCheck(parsed, traceId);
+          // Handle strategy triggers: risk gate → executor with strategy-specific params
+          if (stratResult?.triggered?.length > 0) {
+            for (const trigger of stratResult.triggered) {
+              if (trigger.action === 'hold' || !trigger.strategy_id) continue;
+
+              // Only execute triggers from active strategies (not proposed)
+              try {
+                const stratRow = db.prepare('SELECT status FROM compound_strategies WHERE strategy_id = ?').get(trigger.strategy_id);
+                if (!stratRow || stratRow.status !== 'active') {
+                  log.info('strategy_trigger_skip_not_active', { module: 'pipeline', strategy: trigger.strategy_id, status: stratRow?.status });
+                  continue;
+                }
+              } catch {}
+
+              // Close action = close existing position, NOT open a new one
+              if (trigger.action === 'close') {
+                log.info('strategy_close_signal', { module: 'pipeline', strategy: trigger.strategy_id, symbol: trigger.symbol });
+                // TODO: implement position close via executor (for now, log only)
+                continue;
+              }
+
+              // Only open_long / open_short trigger new trades
+              if (trigger.action !== 'open_long' && trigger.action !== 'open_short') continue;
+
+              const isBuy = trigger.action === 'open_long';
+              const tradeSignal = {
+                ...parsed,
+                recommended_action: isBuy ? 'strong_buy' : 'strong_sell',
+                symbol: trigger.symbol,
+                strategy_id: trigger.strategy_id,
+                params: trigger.params || {},
+                ...(trigger.params || {}), // flatten params for executor
+              };
+              const riskVerdict = await runRiskCheck(tradeSignal, traceId);
+              if (riskVerdict.pass) {
+                executeBitgetTrade(tradeSignal, traceId).catch(err => log.error('strategy_trade_error', { module: 'pipeline', strategy: trigger.strategy_id, error: err.message }));
+              } else {
+                log.warn('strategy_risk_veto', { module: 'pipeline', strategy: trigger.strategy_id, reason: riskVerdict.reason });
+              }
+            }
+          }
+        } catch (err) { log.error('strategist_error', { module: 'pipeline', error: err.message }); }
       }
 
       // Patrol report: accumulate and push every 3h (per mode)

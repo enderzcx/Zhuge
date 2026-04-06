@@ -167,9 +167,61 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       },
       requiresConfirmation: true,
     },
+    {
+      name: 'list_compound_strategies',
+      description: 'AI 生成的交易策略列表 (proposed/active/retired 状态)',
+      parameters: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', description: '状态筛选: active/proposed/retired/all (默认 active)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'strategy_performance',
+      description: '查看某个 AI 策略的历史表现和交易明细',
+      parameters: {
+        type: 'object',
+        properties: {
+          strategy_id: { type: 'string', description: '策略 ID' },
+        },
+        required: ['strategy_id'],
+      },
+      requiresConfirmation: false,
+    },
   ];
 
   const EXECUTORS = {
+    async list_compound_strategies({ status } = {}) {
+      try {
+        const filter = status === 'all' ? '' : `WHERE status = '${status || 'active'}'`;
+        const rows = db.prepare(`SELECT strategy_id, name, direction, symbols, confidence, status, evidence_json, created_at FROM compound_strategies ${filter} ORDER BY confidence DESC LIMIT 10`).all();
+        return JSON.stringify(rows.map(r => ({
+          ...r,
+          symbols: JSON.parse(r.symbols || '[]'),
+          evidence: JSON.parse(r.evidence_json || '{}'),
+        })));
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    },
+
+    async strategy_performance({ strategy_id } = {}) {
+      if (!strategy_id) return JSON.stringify({ error: 'strategy_id required' });
+      try {
+        const strategy = db.prepare('SELECT * FROM compound_strategies WHERE strategy_id = ?').get(strategy_id);
+        if (!strategy) return JSON.stringify({ error: 'Strategy not found' });
+        const trades = db.prepare("SELECT trade_id, pair, side, entry_price, exit_price, pnl, pnl_pct, opened_at, closed_at FROM trades WHERE strategy_id = ? ORDER BY opened_at DESC LIMIT 20").all(strategy_id);
+        return JSON.stringify({
+          strategy: { ...strategy, symbols: JSON.parse(strategy.symbols || '[]'), evidence: JSON.parse(strategy.evidence_json || '{}'), entry_conditions: JSON.parse(strategy.entry_conditions || '[]'), exit_conditions: JSON.parse(strategy.exit_conditions || '[]') },
+          trades,
+        });
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    },
+
     async crucix_data({ key } = {}) {
       try {
         const data = await fetchCrucix();
@@ -180,7 +232,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         }
         return JSON.stringify(compactCrucixObj ? compactCrucixObj(data) : data);
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
@@ -197,7 +249,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           url: n.url || n.link || '',
         })));
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
@@ -213,7 +265,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           fundingRate: o.fundingRate,
         })));
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
@@ -236,7 +288,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           `[${u.channel || '?'}] ${(u.text || '').slice(0, 200)}`
         ).join('\n\n');
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
@@ -254,7 +306,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           urgent: n.urgent || false,
         })));
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
@@ -271,7 +323,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           summary: result.summary || 'done',
         });
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
@@ -305,7 +357,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           reasoning: (r.reasoning || '').slice(0, 200),
         })));
       } catch (err) {
-        return `{ "error": "${err.message}" }`;
+        return JSON.stringify({ error: err.message });
       }
     },
 
