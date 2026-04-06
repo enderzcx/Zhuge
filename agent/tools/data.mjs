@@ -332,59 +332,87 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         const root = process.cwd();
         const parts = [];
 
-        // 1. Project info
-        try {
-          const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-          parts.push(`项目: ${pkg.name} v${pkg.version}\n依赖: ${Object.keys(pkg.dependencies || {}).join(', ')}`);
-        } catch {}
+        // Only scan meaningful directories (skip stockpulse/, routes/, tests/, integrations/)
+        const SCAN_DIRS = ['agent', 'agents', 'bitget', 'market'];
+        const SCAN_ROOT_FILES = ['index.mjs', 'pipeline.mjs', 'config.mjs', 'db.mjs'];
 
-        // 2. File tree with line counts
-        const modules = [];
-        function scanDir(dir, prefix = '') {
+        // 1. Read key files with first-line descriptions
+        const fileDescs = [];
+        function getDesc(filePath) {
           try {
-            for (const f of readdirSync(dir)) {
-              if (f.startsWith('.') || f === 'node_modules' || f === 'data') continue;
-              const full = join(dir, f);
-              const stat = statSync(full);
-              if (stat.isDirectory()) scanDir(full, prefix + f + '/');
-              else if (f.endsWith('.mjs') || f.endsWith('.md')) {
-                const lines = readFileSync(full, 'utf-8').split('\n').length;
-                modules.push({ path: prefix + f, lines });
+            const content = readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n').length;
+            // Extract first JSDoc comment line or first non-empty line
+            const match = content.match(/\/\*\*?\s*\n?\s*\*?\s*(.+?)[\n*]/);
+            const desc = match?.[1]?.trim() || '';
+            return { lines, desc };
+          } catch { return { lines: 0, desc: '' }; }
+        }
+
+        // Root files
+        for (const f of SCAN_ROOT_FILES) {
+          const info = getDesc(join(root, f));
+          fileDescs.push(`  ${f} (${info.lines}行) — ${info.desc}`);
+        }
+
+        // Scan directories
+        for (const dir of SCAN_DIRS) {
+          try {
+            const dirPath = join(root, dir);
+            const files = [];
+            function walk(d, prefix) {
+              for (const f of readdirSync(d)) {
+                const full = join(d, f);
+                const stat = statSync(full);
+                if (stat.isDirectory()) walk(full, prefix + f + '/');
+                else if (f.endsWith('.mjs')) {
+                  const info = getDesc(full);
+                  files.push(`  ${prefix}${f} (${info.lines}行) — ${info.desc}`);
+                }
               }
             }
+            walk(dirPath, dir + '/');
+            fileDescs.push(`\n[${dir}/]`);
+            fileDescs.push(...files);
           } catch {}
         }
-        scanDir(root);
-        const tree = modules.sort((a, b) => b.lines - a.lines).map(m => `  ${m.path} (${m.lines}行)`).join('\n');
-        parts.push(`文件 (${modules.length}个, ${modules.reduce((s, m) => s + m.lines, 0)}行):\n${tree}`);
 
-        // 3. Architecture: your role + sub-agents
-        parts.push(`你的角色: 你是这个系统的总指挥 (TG Agent)。以下 AI Agent 是你的下属，它们在后台自动运行，不需要你触发：
+        const totalFiles = fileDescs.filter(f => f.includes('行')).length;
+        parts.push(`代码结构 (${totalFiles}个核心文件):\n${fileDescs.join('\n')}`);
 
-  analyst (分析师): 每30分钟自动分析市场 — 宏观/技术/情绪/链上/Fib，产出交易信号
-  risk (风控官): 在 analyst 产出信号后自动审核 — 24h亏损>5%/连续3亏/余额不足 → 一票否决
-  researcher (研究员): scanner 发现新币后自动评分 — volume/价格动量/narrative/funding
-  strategist (策略师): 每30分钟评估当前策略是否合理
-  reviewer (复盘员): 每3小时复盘最近交易，提取教训，评估信号准确率
+        // 2. Sub-agents with actual role descriptions (read from system prompts)
+        const agentRoles = [];
+        const agentDir = join(root, 'agents');
+        for (const f of readdirSync(agentDir).filter(f => f.endsWith('.mjs'))) {
+          try {
+            const content = readFileSync(join(agentDir, f), 'utf-8');
+            // Extract system prompt role line (usually "You are a ...")
+            const roleMatch = content.match(/You are (?:a |an |the )?(.+?)[\.\n"'`]/i);
+            const role = roleMatch?.[1]?.slice(0, 80) || f;
+            agentRoles.push(`  ${f.replace('.mjs', '')}: ${role}`);
+          } catch {}
+        }
+        parts.push(`你的下属 AI Agent (后台自动运行，你是总指挥):\n${agentRoles.join('\n')}\n\n用 agent_decisions 查看它们的决策，query_metrics 监控表现`);
 
-你通过 agent_decisions 工具查看它们的决策，通过 query_metrics 监控它们的表现（延迟、token消耗、错误率）。`);
-
-        // 4. Automation schedule
-        parts.push(`自动化流水线 (不需要你触发，全部后台运行):
+        // 3. Automation (read actual intervals from config/pipeline)
+        parts.push(`自动化流水线 (后台运行，不需要你触发):
   pipeline: 每30分钟 → 采集数据 → analyst分析 → risk审核 → 自动交易/否决
-  scanner: 每30分钟 → 扫描540+合约 → 发现候选 → researcher评分 → 自动开仓
-  trade_sync: 每5分钟 → 同步订单状态、检测止损触发、更新持仓
-  dashboard: 自动推送 → positions每5min, observe每2h, PnL图每6h, 新闻摘要每1h
-  health: 每60秒 → 采集 heap/rss/cpu/event_loop → 超阈值自动告警
-  compound: 每10笔交易关闭 → LLM自主复盘 → 发现pattern → 写规则 → 注入下次决策`);
+  scanner: 每30分钟 → 扫描540+合约 → researcher评分 → 自动开仓
+  trade_sync: 每5分钟 → 同步订单/止损/持仓
+  dashboard: positions每5min, observe每2h, PnL图每6h, 新闻每1h
+  health: 每60秒采集 → 超阈值自动告警到TG
+  compound: 每10笔关仓 → LLM自主复盘 → 写规则 → 注入下次决策`);
 
-        // 5. PM2 processes
+        // 4. PM2 processes
         try {
           const { execSync } = await import('child_process');
           const pm2 = execSync('pm2 jlist', { encoding: 'utf-8', timeout: 5000 });
           const procs = JSON.parse(pm2).map(p => `  ${p.name}: ${p.pm2_env.status} | mem:${Math.round(p.monit.memory / 1024 / 1024)}MB | uptime:${Math.round((Date.now() - p.pm2_env.pm_uptime) / 3600000)}h`);
           parts.push(`PM2 进程:\n${procs.join('\n')}`);
         } catch {}
+
+        // 5. Skipped directories (agent should know these exist but aren't core)
+        parts.push(`跳过的目录 (非核心): stockpulse/ (废弃), routes/ (HTTP API), tests/, integrations/lifi.mjs (未启用)`);
 
         return parts.join('\n\n');
       } catch (err) {
