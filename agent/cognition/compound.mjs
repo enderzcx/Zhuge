@@ -55,8 +55,13 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
    */
   async function run() {
     const trades = provenance.getRecentClosed(50);
-    if (trades.length < MIN_TRADES_FOR_COMPOUND) {
-      _log.info('compound_skip', { module: 'compound', trades: trades.length, reason: 'not enough data' });
+
+    // Check if there's enough data to review (trades OR vetoes OR signal scores)
+    let vetoCount = 0;
+    try { vetoCount = db.prepare("SELECT COUNT(*) as cnt FROM decisions WHERE agent='risk' AND action='veto' AND timestamp > datetime('now', '-7 days')").get().cnt; } catch {}
+
+    if (trades.length < MIN_TRADES_FOR_COMPOUND && vetoCount < 10) {
+      _log.info('compound_skip', { module: 'compound', trades: trades.length, vetoes: vetoCount, reason: 'not enough data' });
       return null;
     }
 
