@@ -358,18 +358,25 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         const tree = modules.sort((a, b) => b.lines - a.lines).map(m => `  ${m.path} (${m.lines}行)`).join('\n');
         parts.push(`文件 (${modules.length}个, ${modules.reduce((s, m) => s + m.lines, 0)}行):\n${tree}`);
 
-        // 3. Sub-agents — read first comment block from each
-        const agentDir = join(root, 'agents');
-        const agentFiles = readdirSync(agentDir).filter(f => f.endsWith('.mjs'));
-        const agentDescs = agentFiles.map(f => {
-          const content = readFileSync(join(agentDir, f), 'utf-8');
-          const comment = content.match(/\/\*\*?\s*\n?\s*\*?\s*(.+?)[\n*]/)?.[1]?.trim() || f;
-          return `  ${f}: ${comment}`;
-        });
-        parts.push(`子 Agent (${agentFiles.length}个):\n${agentDescs.join('\n')}`);
+        // 3. Architecture: your role + sub-agents
+        parts.push(`你的角色: 你是这个系统的总指挥 (TG Agent)。以下 AI Agent 是你的下属，它们在后台自动运行，不需要你触发：
+
+  analyst (分析师): 每30分钟自动分析市场 — 宏观/技术/情绪/链上/Fib，产出交易信号
+  risk (风控官): 在 analyst 产出信号后自动审核 — 24h亏损>5%/连续3亏/余额不足 → 一票否决
+  researcher (研究员): scanner 发现新币后自动评分 — volume/价格动量/narrative/funding
+  strategist (策略师): 每30分钟评估当前策略是否合理
+  reviewer (复盘员): 每3小时复盘最近交易，提取教训，评估信号准确率
+
+你通过 agent_decisions 工具查看它们的决策，通过 query_metrics 监控它们的表现（延迟、token消耗、错误率）。`);
 
         // 4. Automation schedule
-        parts.push(`自动化:\n  pipeline: 每30分钟 (analyst→risk→trade→strategist)\n  scanner: 每30分钟 (momentum 发现+研究+交易)\n  pending_review: 每5分钟 (订单同步)\n  dashboard: positions每5min, observe每2h, chart每6h\n  health: 每60秒采集 (heap/rss/cpu/event_loop)\n  compound: 每10笔交易关闭后自动复盘`);
+        parts.push(`自动化流水线 (不需要你触发，全部后台运行):
+  pipeline: 每30分钟 → 采集数据 → analyst分析 → risk审核 → 自动交易/否决
+  scanner: 每30分钟 → 扫描540+合约 → 发现候选 → researcher评分 → 自动开仓
+  trade_sync: 每5分钟 → 同步订单状态、检测止损触发、更新持仓
+  dashboard: 自动推送 → positions每5min, observe每2h, PnL图每6h, 新闻摘要每1h
+  health: 每60秒 → 采集 heap/rss/cpu/event_loop → 超阈值自动告警
+  compound: 每10笔交易关闭 → LLM自主复盘 → 发现pattern → 写规则 → 注入下次决策`);
 
         // 5. PM2 processes
         try {
