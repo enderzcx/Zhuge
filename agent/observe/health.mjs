@@ -9,7 +9,7 @@ const SAMPLE_INTERVAL = 60 * 1000; // 1 min
 const ALERT_COOLDOWN = 30 * 60 * 1000; // 30 min
 
 const THRESHOLDS = {
-  heap_pct:       85,
+  heap_pct:       95,   // V8 heap utilization — normally 80%+, only alert on extreme
   event_loop_ms: 500,
   mem_pct:        90,
 };

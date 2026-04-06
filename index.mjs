@@ -137,7 +137,7 @@ confirmHandler.setTgCall(agentBot.tgCall);
 const tgSend = (text) => agentBot.sendMessage(config.TG_CHAT_ID, text);
 pushEngine = createSmartPush({ db, config, tgSend, tgCall: agentBot.tgCall, log, metrics });
 _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
-_alertRef.fn = (msg) => pushEngine.pushError('health', msg); // wire health alerts → TG
+_alertRef.fn = (msg) => pushEngine.pushError({ source: 'health', message: msg }); // wire health alerts → TG
 
 // Create pipeline (after push engine)
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine });

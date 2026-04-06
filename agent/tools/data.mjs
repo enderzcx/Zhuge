@@ -94,6 +94,12 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       },
       requiresConfirmation: false,
     },
+    {
+      name: 'status_report',
+      description: '一键状态报告: 持仓 + PnL + 余额 + 系统资源 + 最近错误 + compound规则',
+      parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
   ];
 
   const EXECUTORS = {
@@ -233,6 +239,53 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         })));
       } catch (err) {
         return `{ "error": "${err.message}" }`;
+      }
+    },
+
+    async status_report() {
+      const parts = [];
+      try {
+        // 1. Positions
+        const openTrades = db.prepare("SELECT pair, side, leverage, entry_price, amount, pnl FROM trades WHERE status = 'open'").all();
+        if (openTrades.length > 0) {
+          const posLines = openTrades.map(t => `  ${t.pair} ${t.side} ${t.leverage}x @ ${t.entry_price}`);
+          parts.push(`持仓 (${openTrades.length}):\n${posLines.join('\n')}`);
+        } else {
+          parts.push('持仓: 无');
+        }
+
+        // 2. PnL summary
+        const stats = db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE status = 'closed' AND pnl != 0").get();
+        const winRate = stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(0) : '0';
+        parts.push(`PnL: ${stats.total_pnl?.toFixed(2) || 0} USDT | 胜率: ${winRate}% (${stats.wins}/${stats.total})`);
+
+        // 3. System resources
+        const heap = process.memoryUsage();
+        const os = await import('os');
+        const upH = (process.uptime() / 3600).toFixed(1);
+        parts.push(`系统: Heap ${Math.round(heap.heapUsed / 1024 / 1024)}MB | RSS ${Math.round(heap.rss / 1024 / 1024)}MB | Mem ${Math.round((1 - os.freemem() / os.totalmem()) * 100)}% | Uptime ${upH}h`);
+
+        // 4. Recent errors (last 1h)
+        const h1 = Date.now() - 3600000;
+        const errors = db.prepare("SELECT COALESCE(SUM(value), 0) as cnt FROM metrics WHERE name = 'error_count' AND ts > ?").get(h1);
+        parts.push(`错误 (1h): ${errors.cnt || 0}`);
+
+        // 5. LLM stats (last 1h)
+        const llm = db.prepare("SELECT COUNT(*) as cnt, COALESCE(AVG(value), 0) as avg FROM metrics WHERE name = 'llm_latency_ms' AND ts > ?").get(h1);
+        parts.push(`LLM (1h): ${llm.cnt} 次, 平均 ${Math.round(llm.avg)}ms`);
+
+        // 6. Active compound rules
+        try {
+          const rules = db.prepare("SELECT description, confidence FROM compound_rules WHERE status = 'active' ORDER BY confidence DESC LIMIT 3").all();
+          if (rules.length > 0) {
+            const ruleLines = rules.map(r => `  ${(r.confidence * 100).toFixed(0)}% ${r.description.slice(0, 60)}`);
+            parts.push(`Compound 规则 (${rules.length}):\n${ruleLines.join('\n')}`);
+          }
+        } catch {}
+
+        return parts.join('\n\n');
+      } catch (err) {
+        return `Error: ${err.message}`;
       }
     },
   };
