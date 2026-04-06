@@ -148,9 +148,12 @@ export async function* agentLoop(conversationId, userMessage, deps) {
       // Continue loop — LLM will process tool results
     }
 
-    // Memory checkpoint: if no save_memory was called this conversation, force one more round
-    const calledSaveMemory = allToolCalls.some(tc => tc.name === 'save_memory' || tc.name === 'save_recallable_memory');
-    if (!calledSaveMemory && rounds > 0 && rounds < MAX_ROUNDS && finalContent) {
+    // Memory checkpoint: force context.md update if not done this conversation
+    // Must specifically check for context.md write — saving directives or notes doesn't count
+    const savedContext = allToolCalls.some(tc =>
+      tc.name === 'save_memory' && tc.args?.file === 'context.md'
+    );
+    if (!savedContext && rounds < MAX_ROUNDS && finalContent) {
       _log.info('memory_checkpoint', { module: 'agent-loop', conversationId, msg: 'no save_memory called, nudging' });
       history.add(conversationId, {
         role: 'user',

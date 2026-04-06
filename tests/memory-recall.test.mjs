@@ -91,7 +91,7 @@ describe('recallable memory', () => {
       maxMemories: 2,
     });
 
-    expect(prompt).toContain('Memory Index');
+    // Index only injected when >3 notes; with 1 note it's skipped (token saving)
     expect(prompt).toContain('Recalled Memory Notes');
     expect(prompt).toContain('Trade sizing preference');
   });

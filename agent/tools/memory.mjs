@@ -6,10 +6,12 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { unlinkSync } from 'fs';
 import {
   MEMORY_DIR,
   MEMORY_TYPES,
   ensureMemoryLayout,
+  listRecallableMemories,
   readRecallableMemory,
   recallMemories,
   saveRecallableMemory,
@@ -171,6 +173,25 @@ export function createMemoryTools({ log }) {
       },
       requiresConfirmation: false,
     },
+    {
+      name: 'forget_memory',
+      description: 'Delete a long-term memory note that is outdated, wrong, or no longer useful.',
+      parameters: {
+        type: 'object',
+        properties: {
+          slug: { type: 'string', description: 'Memory slug to delete' },
+          reason: { type: 'string', description: 'Why this memory should be forgotten' },
+        },
+        required: ['slug'],
+      },
+      requiresConfirmation: true,
+    },
+    {
+      name: 'list_memory_notes',
+      description: 'List all saved long-term memory notes with name, type, and last updated time.',
+      parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
   ];
 
   function operationalPath(file) {
@@ -325,6 +346,38 @@ export function createMemoryTools({ log }) {
           type: memory.type,
           updatedAt: memory.updatedAt,
           content: memory.body.slice(0, 3000),
+        };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+
+    async forget_memory({ slug, reason }) {
+      if (!slug) return { error: 'slug required' };
+      try {
+        const memory = readRecallableMemory(slug, { memoryDir: MEMORY_DIR });
+        if (!memory) return { error: `memory not found: ${slug}` };
+        unlinkSync(memory.filePath);
+        _log.info('memory_forgotten', { module: 'memory', slug, reason: reason || 'no reason' });
+        return { ok: true, slug, deleted: memory.name };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+
+    async list_memory_notes() {
+      try {
+        const notes = listRecallableMemories({ memoryDir: MEMORY_DIR });
+        return {
+          ok: true,
+          count: notes.length,
+          notes: notes.map(n => ({
+            slug: n.slug,
+            name: n.name,
+            type: n.type,
+            description: n.description,
+            updatedAt: n.updatedAt,
+          })),
         };
       } catch (err) {
         return { error: err.message };

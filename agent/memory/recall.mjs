@@ -249,12 +249,27 @@ export function saveRecallableMemory({
     throw new Error(`invalid memory type: ${type}`);
   }
 
-  const cleanSlug = slugify(slug || name);
-  const relativePath = `${NOTES_DIRNAME}/${cleanSlug}.md`;
-  const filePath = join(memoryDir, relativePath);
+  let cleanSlug = slugify(slug || name);
+  let relativePath = `${NOTES_DIRNAME}/${cleanSlug}.md`;
+  let filePath = join(memoryDir, relativePath);
 
+  // Slug collision protection: if file exists and overwrite is not explicitly requested,
+  // append a timestamp suffix to avoid silently destroying old memory
   if (!overwrite && existsSync(filePath)) {
     throw new Error(`memory already exists: ${cleanSlug}`);
+  }
+  if (overwrite && existsSync(filePath)) {
+    // Check if existing file has a DIFFERENT name in frontmatter — if so, it's a collision, not an update
+    try {
+      const existing = readFileSync(filePath, 'utf-8');
+      const { attributes } = parseFrontmatter(existing);
+      if (attributes.name && attributes.name !== escapeFrontmatterValue(name)) {
+        // Different memory landed on same slug — disambiguate
+        cleanSlug = `${cleanSlug}-${Date.now().toString(36)}`;
+        relativePath = `${NOTES_DIRNAME}/${cleanSlug}.md`;
+        filePath = join(memoryDir, relativePath);
+      }
+    } catch {}
   }
 
   const fileContent = [
@@ -316,22 +331,25 @@ export function buildRecallPrompt({
 } = {}) {
   ensureMemoryLayout(memoryDir);
 
-  const indexText = truncate(readIndex(memoryDir), MAX_INDEX_CHARS);
   const recalled = recallMemories(query, { memoryDir, limit: maxMemories });
 
-  if (!indexText && recalled.length === 0) return '';
+  // Don't inject anything if no notes exist — save tokens for market context
+  if (recalled.length === 0) return '';
 
   const parts = ['## 长期记忆'];
 
-  if (indexText) {
-    parts.push('### Memory Index');
-    parts.push(indexText);
+  // Only inject index when there are enough notes to make it useful (>3)
+  const allNotes = listRecallableMemories({ memoryDir });
+  if (allNotes.length > 3) {
+    const indexText = truncate(readIndex(memoryDir), MAX_INDEX_CHARS);
+    if (indexText) {
+      parts.push('### Memory Index');
+      parts.push(indexText);
+    }
   }
 
   parts.push('### Recalled Memory Notes');
-  if (recalled.length === 0) {
-    parts.push('(no strongly relevant long-term memories)');
-  } else {
+  {
     for (const memory of recalled) {
       parts.push(
         [
