@@ -3,9 +3,17 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from 'fs';
+
+/** Atomic write: write to .tmp then rename. Prevents half-written files on crash. */
+export function atomicWrite(filePath, content) {
+  const tmp = filePath + '.tmp';
+  writeFileSync(tmp, content, 'utf-8');
+  renameSync(tmp, filePath);
+}
 import { join } from 'path';
 
 export const MEMORY_DIR = 'agent/memory';
@@ -37,7 +45,7 @@ export function ensureMemoryLayout(memoryDir = MEMORY_DIR) {
 
   const indexPath = join(memoryDir, MEMORY_INDEX_FILE);
   if (!existsSync(indexPath)) {
-    writeFileSync(indexPath, DEFAULT_MEMORY_INDEX, 'utf-8');
+    atomicWrite(indexPath, DEFAULT_MEMORY_INDEX);
   }
 }
 
@@ -228,7 +236,7 @@ function upsertIndexEntry(memoryDir, { relativePath, name, description }) {
   }
 
   content = `${lines.join('\n')}\n`;
-  writeFileSync(indexPath, content, 'utf-8');
+  atomicWrite(indexPath, content);
 }
 
 export function saveRecallableMemory({
@@ -283,7 +291,7 @@ export function saveRecallableMemory({
     '',
   ].join('\n');
 
-  writeFileSync(filePath, fileContent, 'utf-8');
+  atomicWrite(filePath, fileContent);
   upsertIndexEntry(memoryDir, {
     relativePath: relativePath.replace(/\\/g, '/'),
     name: escapeFrontmatterValue(name),

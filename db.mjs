@@ -318,6 +318,18 @@ export function createDB() {
       superseded_at TEXT,
       superseded_by TEXT
     );
+    -- Dream runs: memory consolidation history
+    CREATE TABLE IF NOT EXISTS dream_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      notes_reviewed INTEGER DEFAULT 0,
+      merged INTEGER DEFAULT 0,
+      deleted INTEGER DEFAULT 0,
+      created INTEGER DEFAULT 0,
+      summary TEXT,
+      backup_json TEXT,
+      run_at TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS compound_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       trades_reviewed INTEGER,

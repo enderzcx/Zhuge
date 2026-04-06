@@ -391,5 +391,17 @@ ${numbered}
     timers.length = 0;
   }
 
-  return { start, stop, postPositions, postObserve, postCompound, postPnLChart, checkTgUrgent, postNewsDigest };
+  async function postDream(result) {
+    if (!result || (result.merged === 0 && result.deleted === 0 && result.created === 0)) return;
+    const lines = [
+      '💤 Dream Worker (Memory Consolidation)',
+      '',
+      `Reviewed: ${result.notes} notes`,
+      `Merged: ${result.merged} | Deleted: ${result.deleted} | Created: ${result.created}`,
+      result.summary || '',
+    ];
+    await _send(lines.join('\n'), topics.system);
+  }
+
+  return { start, stop, postPositions, postObserve, postCompound, postDream, postPnLChart, checkTgUrgent, postNewsDigest };
 }

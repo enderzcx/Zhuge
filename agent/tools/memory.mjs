@@ -5,6 +5,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { atomicWrite } from '../memory/recall.mjs';
 import { join } from 'path';
 import { unlinkSync } from 'fs';
 import {
@@ -219,7 +220,7 @@ export function createMemoryTools({ log }) {
           append && existsSync(path)
             ? `${readFileSync(path, 'utf-8').trimEnd()}\n${String(content).trim()}\n`
             : String(content);
-        writeFileSync(path, nextContent, 'utf-8');
+        atomicWrite(path, nextContent);
         _log.info('memory_saved', {
           module: 'memory',
           file,
@@ -263,13 +264,13 @@ export function createMemoryTools({ log }) {
         const idx = content.indexOf(section);
 
         if (idx === -1) {
-          writeFileSync(path, `${content.trimEnd()}\n${line}\n`, 'utf-8');
+          atomicWrite(path, `${content.trimEnd()}\n${line}\n`);
         } else {
           const nextSection = content.indexOf('\n## ', idx + section.length);
           const insertAt = nextSection === -1 ? content.length : nextSection;
           const updated =
             `${content.slice(0, insertAt).trimEnd()}\n${line}\n${content.slice(insertAt)}`;
-          writeFileSync(path, updated, 'utf-8');
+          atomicWrite(path, updated);
         }
 
         _log.info('directive_added', {

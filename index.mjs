@@ -45,6 +45,7 @@ import { createConfirmHandler } from './agent/telegram/confirm.mjs';
 import { createAgentBot } from './agent/telegram/bot.mjs';
 import { createProvenance } from './agent/cognition/provenance.mjs';
 import { createCompound } from './agent/cognition/compound.mjs';
+import { createDream } from './agent/cognition/dream.mjs';
 // Push Engine (Phase 3) + Dashboard (Phase 4) + Primary Market (Phase 5)
 import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
 import { createDashboard } from './agent/push/dashboard.mjs';
@@ -107,6 +108,11 @@ const toolRegistry = createToolRegistry();
 const agentProvenance = createProvenance({ db: db.db, log });
 const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenance, log, metrics, rag: { getAll: (...a) => _ragRef.instance?.getAll(...a) || [], updateConfidence: (...a) => _ragRef.instance?.updateConfidence(...a) } });
 _compoundRef.instance = agentCompound; // wire into scanner via getter
+
+// --- Dream Worker (memory consolidation) ---
+const dream = createDream({ db: db.db, llm, log, metrics });
+
+dream.start();
 
 // --- RAG Knowledge Base ---
 const rag = createRAG({ config, log });
@@ -220,6 +226,7 @@ app.listen(config.PORT, () => {
       // Stop accepting new work
       if (agentBot?.stop) agentBot.stop();
       health.stop();
+      dream.stop();
       // Sync trades one last time (detect fills before exit)
       await bitgetExec.checkAndSyncTrades().catch(() => {});
       // Auto-save context.md — dump structured state so next startup has continuity
