@@ -1,0 +1,349 @@
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'fs';
+import { join } from 'path';
+
+export const MEMORY_DIR = 'agent/memory';
+export const NOTES_DIRNAME = 'notes';
+export const MEMORY_INDEX_FILE = 'MEMORY.md';
+export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'];
+
+const DEFAULT_MEMORY_INDEX = `# Zhuge Memory Index
+
+Operational files
+- [owner_directives.md](owner_directives.md) - hard and soft constraints from the owner
+- [context.md](context.md) - short-lived working context, safe to overwrite
+- [market_context.md](market_context.md) - optional market snapshot
+- [trading_lessons.md](trading_lessons.md) - optional operational lessons
+
+Recallable notes
+- Store durable notes under [notes/](notes/)
+- Each note should use frontmatter: name, description, type
+- Valid types: user, feedback, project, reference
+- Keep each index line short; put the detail in the note file
+`;
+
+const MAX_INDEX_CHARS = 1800;
+const MAX_NOTE_CHARS = 1400;
+
+export function ensureMemoryLayout(memoryDir = MEMORY_DIR) {
+  mkdirSync(memoryDir, { recursive: true });
+  mkdirSync(join(memoryDir, NOTES_DIRNAME), { recursive: true });
+
+  const indexPath = join(memoryDir, MEMORY_INDEX_FILE);
+  if (!existsSync(indexPath)) {
+    writeFileSync(indexPath, DEFAULT_MEMORY_INDEX, 'utf-8');
+  }
+}
+
+export function slugify(value = '') {
+  const slug = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return slug || `memory-${Date.now().toString(36)}`;
+}
+
+function normalizeText(value = '') {
+  return String(value).toLowerCase();
+}
+
+function parseFrontmatter(raw = '') {
+  const text = String(raw);
+  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) {
+    return { attributes: {}, body: text.trim() };
+  }
+
+  const normalized = text.replace(/\r\n/g, '\n');
+  const end = normalized.indexOf('\n---\n', 4);
+  if (end === -1) {
+    return { attributes: {}, body: normalized.trim() };
+  }
+
+  const frontmatter = normalized.slice(4, end).trim();
+  const body = normalized.slice(end + 5).trim();
+  const attributes = {};
+
+  for (const line of frontmatter.split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (key) attributes[key] = value;
+  }
+
+  return { attributes, body };
+}
+
+function truncate(text, maxChars) {
+  const value = String(text || '').trim();
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
+}
+
+function escapeFrontmatterValue(value = '') {
+  return String(value).replace(/\r?\n/g, ' ').replace(/:/g, ' -').trim();
+}
+
+function readIndex(memoryDir) {
+  ensureMemoryLayout(memoryDir);
+  const indexPath = join(memoryDir, MEMORY_INDEX_FILE);
+  return readFileSync(indexPath, 'utf-8');
+}
+
+function walkMarkdownFiles(dir) {
+  if (!existsSync(dir)) return [];
+
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkMarkdownFiles(fullPath));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.md')) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+function extractTerms(text = '') {
+  const normalized = normalizeText(text);
+  const terms = new Set(normalized.match(/[a-z0-9_/-]{2,}/g) || []);
+  const chineseRuns = normalized.match(/[\u4e00-\u9fff]{2,}/g) || [];
+
+  for (const run of chineseRuns) {
+    if (run.length <= 4) {
+      terms.add(run);
+      continue;
+    }
+    for (let i = 0; i < run.length - 1; i++) {
+      terms.add(run.slice(i, i + 2));
+    }
+  }
+
+  return [...terms];
+}
+
+function recencyScore(mtimeMs) {
+  const ageDays = Math.max(0, (Date.now() - mtimeMs) / (24 * 60 * 60 * 1000));
+  return Math.max(0, 1.5 - ageDays / 10);
+}
+
+function scoreMemory(query, memory) {
+  const haystack = normalizeText(
+    [
+      memory.name,
+      memory.description,
+      memory.type,
+      memory.body.slice(0, 800),
+      memory.slug,
+    ].join(' '),
+  );
+
+  if (!String(query || '').trim()) {
+    return recencyScore(memory.mtimeMs);
+  }
+
+  const queryTerms = extractTerms(query);
+  if (queryTerms.length === 0) {
+    return recencyScore(memory.mtimeMs) * 0.5;
+  }
+
+  let score = recencyScore(memory.mtimeMs) * 0.5;
+  let hits = 0;
+
+  for (const term of queryTerms) {
+    if (!haystack.includes(term)) continue;
+    hits++;
+    score += term.length >= 4 ? 2.5 : 1.25;
+  }
+
+  score += hits / queryTerms.length;
+  return score;
+}
+
+export function listRecallableMemories({ memoryDir = MEMORY_DIR } = {}) {
+  ensureMemoryLayout(memoryDir);
+  const notesDir = join(memoryDir, NOTES_DIRNAME);
+
+  return walkMarkdownFiles(notesDir)
+    .map(filePath => {
+      const raw = readFileSync(filePath, 'utf-8');
+      const { attributes, body } = parseFrontmatter(raw);
+      const stat = statSync(filePath);
+      const relativePath = filePath
+        .slice(memoryDir.length + 1)
+        .replace(/\\/g, '/');
+      const slug = relativePath
+        .replace(/^notes\//, '')
+        .replace(/\.md$/i, '');
+
+      return {
+        slug,
+        filePath,
+        relativePath,
+        name: attributes.name || slug,
+        description: attributes.description || '',
+        type: MEMORY_TYPES.includes(attributes.type) ? attributes.type : 'project',
+        body,
+        mtimeMs: stat.mtimeMs,
+        updatedAt: stat.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+export function recallMemories(
+  query,
+  { memoryDir = MEMORY_DIR, limit = 3 } = {},
+) {
+  const scored = listRecallableMemories({ memoryDir })
+    .map(memory => ({ ...memory, score: scoreMemory(query, memory) }))
+    .sort((a, b) => b.score - a.score || b.mtimeMs - a.mtimeMs);
+
+  const threshold = String(query || '').trim() ? 1.25 : -Infinity;
+  return scored.filter(memory => memory.score >= threshold).slice(0, limit);
+}
+
+function upsertIndexEntry(memoryDir, { relativePath, name, description }) {
+  const indexPath = join(memoryDir, MEMORY_INDEX_FILE);
+  let content = readIndex(memoryDir).trimEnd();
+  const entryLine = `- [${name}](${relativePath}) - ${description}`;
+  const lines = content.split(/\r?\n/);
+  const existingIndex = lines.findIndex(line => line.includes(`(${relativePath})`));
+
+  if (existingIndex >= 0) {
+    lines[existingIndex] = entryLine;
+  } else {
+    lines.push(entryLine);
+  }
+
+  content = `${lines.join('\n')}\n`;
+  writeFileSync(indexPath, content, 'utf-8');
+}
+
+export function saveRecallableMemory({
+  memoryDir = MEMORY_DIR,
+  slug,
+  name,
+  description,
+  type = 'project',
+  content,
+  overwrite = true,
+}) {
+  ensureMemoryLayout(memoryDir);
+
+  if (!name || !description || !content) {
+    throw new Error('name, description, and content are required');
+  }
+  if (!MEMORY_TYPES.includes(type)) {
+    throw new Error(`invalid memory type: ${type}`);
+  }
+
+  const cleanSlug = slugify(slug || name);
+  const relativePath = `${NOTES_DIRNAME}/${cleanSlug}.md`;
+  const filePath = join(memoryDir, relativePath);
+
+  if (!overwrite && existsSync(filePath)) {
+    throw new Error(`memory already exists: ${cleanSlug}`);
+  }
+
+  const fileContent = [
+    '---',
+    `name: ${escapeFrontmatterValue(name)}`,
+    `description: ${escapeFrontmatterValue(description)}`,
+    `type: ${type}`,
+    '---',
+    '',
+    String(content).trim(),
+    '',
+  ].join('\n');
+
+  writeFileSync(filePath, fileContent, 'utf-8');
+  upsertIndexEntry(memoryDir, {
+    relativePath: relativePath.replace(/\\/g, '/'),
+    name: escapeFrontmatterValue(name),
+    description: escapeFrontmatterValue(description),
+  });
+
+  return {
+    slug: cleanSlug,
+    filePath,
+    relativePath: relativePath.replace(/\\/g, '/'),
+  };
+}
+
+export function readRecallableMemory(
+  slug,
+  { memoryDir = MEMORY_DIR } = {},
+) {
+  if (!slug) return null;
+  ensureMemoryLayout(memoryDir);
+
+  const cleanSlug = slug.replace(/^notes\//, '').replace(/\.md$/i, '');
+  const filePath = join(memoryDir, NOTES_DIRNAME, `${cleanSlug}.md`);
+  if (!existsSync(filePath)) return null;
+
+  const raw = readFileSync(filePath, 'utf-8');
+  const { attributes, body } = parseFrontmatter(raw);
+  const stat = statSync(filePath);
+
+  return {
+    slug: cleanSlug,
+    filePath,
+    relativePath: `${NOTES_DIRNAME}/${cleanSlug}.md`,
+    name: attributes.name || cleanSlug,
+    description: attributes.description || '',
+    type: MEMORY_TYPES.includes(attributes.type) ? attributes.type : 'project',
+    body,
+    updatedAt: stat.mtime.toISOString(),
+  };
+}
+
+export function buildRecallPrompt({
+  query = '',
+  memoryDir = MEMORY_DIR,
+  maxMemories = 3,
+} = {}) {
+  ensureMemoryLayout(memoryDir);
+
+  const indexText = truncate(readIndex(memoryDir), MAX_INDEX_CHARS);
+  const recalled = recallMemories(query, { memoryDir, limit: maxMemories });
+
+  if (!indexText && recalled.length === 0) return '';
+
+  const parts = ['## 长期记忆'];
+
+  if (indexText) {
+    parts.push('### Memory Index');
+    parts.push(indexText);
+  }
+
+  parts.push('### Recalled Memory Notes');
+  if (recalled.length === 0) {
+    parts.push('(no strongly relevant long-term memories)');
+  } else {
+    for (const memory of recalled) {
+      parts.push(
+        [
+          `#### ${memory.name}`,
+          `type: ${memory.type}`,
+          `updated_at: ${memory.updatedAt}`,
+          `path: ${memory.relativePath}`,
+          truncate(memory.body, MAX_NOTE_CHARS),
+        ].join('\n'),
+      );
+    }
+  }
+
+  return parts.join('\n\n');
+}

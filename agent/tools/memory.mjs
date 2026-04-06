@@ -1,13 +1,21 @@
 /**
- * Memory tools — read/write agent memory files + owner directives.
- *   save_memory, read_memory, add_directive, list_directives
+ * Memory tools:
+ * - operational files: context/directives/logs
+ * - recallable notes: typed, indexed, and auto-recalled into prompts
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import {
+  MEMORY_DIR,
+  MEMORY_TYPES,
+  ensureMemoryLayout,
+  readRecallableMemory,
+  recallMemories,
+  saveRecallableMemory,
+} from '../memory/recall.mjs';
 
-const MEMORY_DIR = 'agent/memory';
-const ALLOWED_FILES = [
+const OPERATIONAL_FILES = [
   'context.md',
   'trading_lessons.md',
   'owner_directives.md',
@@ -16,26 +24,40 @@ const ALLOWED_FILES = [
   'MEMORY.md',
 ];
 
+const DIRECTIVE_TEMPLATE = `# Owner Directives
+
+## Hard Constraints
+
+## Soft Constraints
+
+## Strategy Direction
+`;
+
 export function createMemoryTools({ log }) {
   const _log = log || { info() {}, warn() {}, error() {} };
 
-  // Ensure memory directory exists
-  mkdirSync(MEMORY_DIR, { recursive: true });
+  ensureMemoryLayout(MEMORY_DIR);
 
   const TOOL_DEFS = [
     {
       name: 'save_memory',
-      description: '写入 agent 记忆文件 (context/trading_lessons/market_context/push_log)',
+      description: 'Write an operational memory file such as context.md or market_context.md.',
       parameters: {
         type: 'object',
         properties: {
           file: {
             type: 'string',
-            enum: ALLOWED_FILES,
-            description: '要写入的记忆文件',
+            enum: OPERATIONAL_FILES,
+            description: 'Operational memory file to update',
           },
-          content: { type: 'string', description: '要写入的内容' },
-          append: { type: 'boolean', description: '追加模式 (默认覆盖)' },
+          content: {
+            type: 'string',
+            description: 'File content to write',
+          },
+          append: {
+            type: 'boolean',
+            description: 'Append instead of replacing',
+          },
         },
         required: ['file', 'content'],
       },
@@ -43,14 +65,14 @@ export function createMemoryTools({ log }) {
     },
     {
       name: 'read_memory',
-      description: '读取 agent 记忆文件',
+      description: 'Read an operational memory file such as context.md or owner_directives.md.',
       parameters: {
         type: 'object',
         properties: {
           file: {
             type: 'string',
-            enum: ALLOWED_FILES,
-            description: '要读取的记忆文件',
+            enum: OPERATIONAL_FILES,
+            description: 'Operational memory file to read',
           },
         },
         required: ['file'],
@@ -59,15 +81,18 @@ export function createMemoryTools({ log }) {
     },
     {
       name: 'add_directive',
-      description: '添加老板指令 (策略约束, 永久生效直到用户修改)',
+      description: 'Add a hard or soft owner directive that should shape all future behavior.',
       parameters: {
         type: 'object',
         properties: {
-          directive: { type: 'string', description: '指令内容 (如 "杠杆不超过5x")' },
+          directive: {
+            type: 'string',
+            description: 'Directive content',
+          },
           type: {
             type: 'string',
             enum: ['hard', 'soft'],
-            description: 'hard=永不违反, soft=可建议修改',
+            description: 'hard = never violate, soft = strong default preference',
           },
         },
         required: ['directive'],
@@ -76,79 +101,234 @@ export function createMemoryTools({ log }) {
     },
     {
       name: 'list_directives',
-      description: '列出当前所有老板指令',
+      description: 'List all owner directives currently stored.',
       parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'save_recallable_memory',
+      description: 'Save a long-term typed memory note that can be auto-recalled later.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Human-readable memory title',
+          },
+          description: {
+            type: 'string',
+            description: 'One-line summary used for future recall',
+          },
+          type: {
+            type: 'string',
+            enum: MEMORY_TYPES,
+            description: 'Memory type: user, feedback, project, or reference',
+          },
+          content: {
+            type: 'string',
+            description: 'Full note body',
+          },
+          slug: {
+            type: 'string',
+            description: 'Optional filename slug for notes/<slug>.md',
+          },
+        },
+        required: ['name', 'description', 'type', 'content'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'search_memory',
+      description: 'Search long-term memory notes by the current question or topic.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search query',
+          },
+          limit: {
+            type: 'integer',
+            description: 'Maximum number of matches',
+          },
+        },
+        required: ['query'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'read_recallable_memory',
+      description: 'Read a saved long-term memory note by slug.',
+      parameters: {
+        type: 'object',
+        properties: {
+          slug: {
+            type: 'string',
+            description: 'Memory slug or notes/<slug>.md path',
+          },
+        },
+        required: ['slug'],
+      },
       requiresConfirmation: false,
     },
   ];
 
-  function _filePath(file) {
-    if (!ALLOWED_FILES.includes(file)) return null;
+  function operationalPath(file) {
+    if (!OPERATIONAL_FILES.includes(file)) return null;
     return join(MEMORY_DIR, file);
+  }
+
+  function ensureDirectiveFile() {
+    const path = join(MEMORY_DIR, 'owner_directives.md');
+    if (!existsSync(path)) {
+      writeFileSync(path, DIRECTIVE_TEMPLATE, 'utf-8');
+    }
+    return path;
   }
 
   const EXECUTORS = {
     async save_memory({ file, content, append }) {
-      const path = _filePath(file);
-      if (!path) return `Error: invalid file "${file}". Allowed: ${ALLOWED_FILES.join(', ')}`;
+      const path = operationalPath(file);
+      if (!path) {
+        return { error: `invalid file "${file}"` };
+      }
+
       try {
-        if (append) {
-          const existing = existsSync(path) ? readFileSync(path, 'utf-8') : '';
-          writeFileSync(path, existing + '\n' + content);
-        } else {
-          writeFileSync(path, content);
-        }
-        _log.info('memory_saved', { module: 'memory', file, bytes: content.length });
-        return `OK: ${file} updated (${content.length} bytes)`;
+        const nextContent =
+          append && existsSync(path)
+            ? `${readFileSync(path, 'utf-8').trimEnd()}\n${String(content).trim()}\n`
+            : String(content);
+        writeFileSync(path, nextContent, 'utf-8');
+        _log.info('memory_saved', {
+          module: 'memory',
+          file,
+          bytes: String(content).length,
+        });
+        return { ok: true, file, bytes: String(content).length };
       } catch (err) {
-        return `Error: ${err.message}`;
+        return { error: err.message };
       }
     },
 
     async read_memory({ file }) {
-      const path = _filePath(file);
-      if (!path) return `Error: invalid file "${file}"`;
-      if (!existsSync(path)) return `(empty — ${file} not yet created)`;
+      const path = operationalPath(file);
+      if (!path) {
+        return { error: `invalid file "${file}"` };
+      }
+      if (!existsSync(path)) {
+        return { ok: true, file, content: '' };
+      }
+
       try {
-        return readFileSync(path, 'utf-8').slice(0, 3000);
+        return {
+          ok: true,
+          file,
+          content: readFileSync(path, 'utf-8').slice(0, 3000),
+        };
       } catch (err) {
-        return `Error: ${err.message}`;
+        return { error: err.message };
       }
     },
 
     async add_directive({ directive, type }) {
-      const path = join(MEMORY_DIR, 'owner_directives.md');
-      const now = new Date().toISOString().split('T')[0];
-      const level = type === 'hard' ? '硬约束' : '软约束';
-      const line = `- ${directive} [${level}, ${now}]`;
+      try {
+        const path = ensureDirectiveFile();
+        const now = new Date().toISOString().slice(0, 10);
+        const section =
+          type === 'hard' ? '## Hard Constraints' : '## Soft Constraints';
+        const label = type === 'hard' ? 'hard' : 'soft';
+        const line = `- ${directive} [${label}, ${now}]`;
+        const content = readFileSync(path, 'utf-8');
+        const idx = content.indexOf(section);
 
-      let content = '';
-      if (existsSync(path)) {
-        content = readFileSync(path, 'utf-8');
-      } else {
-        content = '# Owner Directives\n\n## 硬约束 (永不违反)\n\n## 软约束 (可建议修改)\n\n## 策略方向\n';
+        if (idx === -1) {
+          writeFileSync(path, `${content.trimEnd()}\n${line}\n`, 'utf-8');
+        } else {
+          const nextSection = content.indexOf('\n## ', idx + section.length);
+          const insertAt = nextSection === -1 ? content.length : nextSection;
+          const updated =
+            `${content.slice(0, insertAt).trimEnd()}\n${line}\n${content.slice(insertAt)}`;
+          writeFileSync(path, updated, 'utf-8');
+        }
+
+        _log.info('directive_added', {
+          module: 'memory',
+          directive,
+          type: label,
+        });
+        return { ok: true, directive, type: label };
+      } catch (err) {
+        return { error: err.message };
       }
-
-      // Insert into appropriate section
-      const section = type === 'hard' ? '## 硬约束' : '## 软约束';
-      const sectionIdx = content.indexOf(section);
-      if (sectionIdx !== -1) {
-        const nextSection = content.indexOf('\n## ', sectionIdx + section.length);
-        const insertAt = nextSection !== -1 ? nextSection : content.length;
-        content = content.slice(0, insertAt) + line + '\n' + content.slice(insertAt);
-      } else {
-        content += `\n${line}\n`;
-      }
-
-      writeFileSync(path, content);
-      _log.info('directive_added', { module: 'memory', directive, type: level });
-      return `已添加${level}: ${directive}`;
     },
 
     async list_directives() {
-      const path = join(MEMORY_DIR, 'owner_directives.md');
-      if (!existsSync(path)) return '暂无指令';
-      return readFileSync(path, 'utf-8').slice(0, 2000);
+      const path = ensureDirectiveFile();
+      return {
+        ok: true,
+        content: readFileSync(path, 'utf-8').slice(0, 2000),
+      };
+    },
+
+    async save_recallable_memory({ slug, name, description, type, content }) {
+      try {
+        const saved = saveRecallableMemory({
+          memoryDir: MEMORY_DIR,
+          slug,
+          name,
+          description,
+          type,
+          content,
+        });
+        _log.info('recallable_memory_saved', {
+          module: 'memory',
+          slug: saved.slug,
+          type,
+        });
+        return { ok: true, ...saved };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+
+    async search_memory({ query, limit }) {
+      try {
+        const matches = recallMemories(query, {
+          memoryDir: MEMORY_DIR,
+          limit: Number.isFinite(limit) ? limit : 5,
+        }).map(memory => ({
+          slug: memory.slug,
+          name: memory.name,
+          description: memory.description,
+          type: memory.type,
+          updatedAt: memory.updatedAt,
+          score: Number(memory.score.toFixed(2)),
+        }));
+
+        return { ok: true, query, matches };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+
+    async read_recallable_memory({ slug }) {
+      try {
+        const memory = readRecallableMemory(slug, { memoryDir: MEMORY_DIR });
+        if (!memory) {
+          return { error: `memory not found: ${slug}` };
+        }
+        return {
+          ok: true,
+          slug: memory.slug,
+          name: memory.name,
+          description: memory.description,
+          type: memory.type,
+          updatedAt: memory.updatedAt,
+          content: memory.body.slice(0, 3000),
+        };
+      } catch (err) {
+        return { error: err.message };
+      }
     },
   };
 

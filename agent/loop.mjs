@@ -48,7 +48,7 @@ export async function* agentLoop(conversationId, userMessage, deps) {
     history.add(conversationId, { role: 'user', content: userMessage });
 
     // 3. Build system prompt (static + dynamic: compound rules, directives, state)
-    const systemPrompt = await buildSystemPrompt();
+    const systemPrompt = await buildSystemPrompt({ conversationId, userMessage });
 
     for (rounds = 0; rounds < MAX_ROUNDS; rounds++) {
       // 4. Get conversation messages
