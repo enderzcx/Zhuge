@@ -9,9 +9,9 @@ const SAMPLE_INTERVAL = 60 * 1000; // 1 min
 const ALERT_COOLDOWN = 30 * 60 * 1000; // 30 min
 
 const THRESHOLDS = {
-  heap_pct:       95,   // V8 heap utilization — normally 80%+, only alert on extreme
-  event_loop_ms: 500,
-  mem_pct:        90,
+  rss_mb:         400,  // RSS absolute — more meaningful than heap_pct (V8 heap % is normally 90%+)
+  event_loop_ms:  500,
+  mem_pct:         90,
 };
 
 export function createHealthMonitor(metrics, { log, alertFn } = {}) {
@@ -31,17 +31,17 @@ export function createHealthMonitor(metrics, { log, alertFn } = {}) {
     if (alertFn) alertFn(msg);
   }
 
-  function _checkThresholds(heapPct, memPct) {
-    _maybeAlert('heap_pct', heapPct, THRESHOLDS.heap_pct);
+  function _checkThresholds(rssMb, memPct) {
+    _maybeAlert('rss_mb', rssMb, THRESHOLDS.rss_mb);
     _maybeAlert('mem_pct', memPct, THRESHOLDS.mem_pct);
   }
 
   function sample() {
     // Heap
     const heap = process.memoryUsage();
+    const rssMb = Math.round(heap.rss / 1024 / 1024);
     metrics.record('system_heap_mb', Math.round(heap.heapUsed / 1024 / 1024));
-    metrics.record('system_rss_mb', Math.round(heap.rss / 1024 / 1024));
-    const heapPct = heap.heapUsed / heap.heapTotal * 100;
+    metrics.record('system_rss_mb', rssMb);
 
     // System memory
     const totalMem = totalmem();
@@ -67,7 +67,7 @@ export function createHealthMonitor(metrics, { log, alertFn } = {}) {
     prevCpuUsage = total;
 
     // Check non-async thresholds
-    _checkThresholds(heapPct, usedPct);
+    _checkThresholds(rssMb, usedPct);
 
     // Event loop latency (rough)
     const start = performance.now();
