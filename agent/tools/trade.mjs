@@ -74,9 +74,9 @@ export function createTradeTools({ bitgetClient, bitgetExec, db, config }) {
         if (positions.length === 0) return '当前无持仓';
         return positions.map(p => {
           const pnl = parseFloat(p.unrealizedPL || 0);
-          const margin = parseFloat(p.margin || 0);
+          const margin = parseFloat(p.marginSize || 0);
           const pnlPct = margin > 0 ? ((pnl / margin) * 100).toFixed(1) : '0';
-          return `${p.symbol} ${p.holdSide} ${p.leverage}x | 数量:${p.total} | 均价:${p.averageOpenPrice} | 未实现PnL:${pnl.toFixed(2)} USDT (${pnlPct}%) | 保证金:${margin.toFixed(2)}`;
+          return `${p.symbol} ${p.holdSide} ${p.leverage}x | 数量:${p.total} | 均价:${p.openPriceAvg} | 现价:${p.markPrice} | 未实现PnL:${pnl.toFixed(2)} USDT (${pnlPct}%) | 保证金:${margin.toFixed(2)}`;
         }).join('\n');
       } catch (err) {
         return `Error: ${err.message}`;
