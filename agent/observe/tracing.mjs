@@ -15,7 +15,8 @@
 import { trace, SpanStatusCode, context } from '@opentelemetry/api';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { Resource } from '@opentelemetry/resources';
+import resourcePkg from '@opentelemetry/resources';
+const { Resource } = resourcePkg;
 
 let sdk = null;
 let tracer = null;
