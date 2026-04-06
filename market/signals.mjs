@@ -2,6 +2,16 @@
  * Signal scoring engine: historical accuracy tracking + source weight management.
  */
 
+/** Pure: evaluate whether a trading action was correct given price movement. */
+export function isActionCorrect(action, priceBefore, priceAfter) {
+  if (!priceBefore || !priceAfter) return null;
+  const change = (priceAfter - priceBefore) / priceBefore;
+  if (action === 'strong_buy' || action === 'increase_exposure') return change > 0 ? 1 : 0;
+  if (action === 'strong_sell' || action === 'reduce_exposure') return change < 0 ? 1 : 0;
+  if (action === 'hold') return Math.abs(change) < 0.01 ? 1 : 0;
+  return null;
+}
+
 export function createSignalScoring({ db }) {
   const { insertSignalScore } = db;
 
@@ -10,14 +20,7 @@ export function createSignalScoring({ db }) {
     return row?.close || null;
   }
 
-  function isActionCorrect(action, priceBefore, priceAfter) {
-    if (!priceBefore || !priceAfter) return null;
-    const change = (priceAfter - priceBefore) / priceBefore;
-    if (action === 'strong_buy' || action === 'increase_exposure') return change > 0 ? 1 : 0;
-    if (action === 'strong_sell' || action === 'reduce_exposure') return change < 0 ? 1 : 0;
-    if (action === 'hold') return Math.abs(change) < 0.01 ? 1 : 0; // <1% = hold was correct
-    return null;
-  }
+  // isActionCorrect is now a module-level export (above)
 
   function scoreHistoricalSignals() {
     // Score crypto analyses older than 4h that haven't been scored yet

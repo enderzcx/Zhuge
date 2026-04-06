@@ -723,5 +723,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     openScoutPosition, scaleUpPosition, abandonPosition,
     checkScaleUpConditions, checkAbandonConditions,
     getActiveGroup: (symbol) => getActiveGroup(symbol),
+    // Pure math helpers (exported for unit testing)
+    _test: { calculateKellySize, _calcLevelSize, _calcStopLoss, _calcWeightedAvgEntry },
   };
 }

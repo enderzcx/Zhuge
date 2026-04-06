@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node index.mjs",
-    "dev": "node --watch index.mjs"
+    "dev": "node --watch index.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "private": true,
   "dependencies": {
@@ -16,5 +18,8 @@
     "express": "^5.1.0",
     "viem": "^2.47.6",
     "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.2"
   }
 }
