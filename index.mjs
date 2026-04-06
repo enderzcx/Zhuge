@@ -170,10 +170,20 @@ priceStream.setAnomalyHandler((anomaly) => {
 // --- Start ---
 app.listen(config.PORT, () => {
   log.info('server_started', { module: 'index', port: config.PORT, model: config.LLM_MODEL, interval: '30min' });
-  const runAnalysis = () => pipeline.collectAndAnalyze()
-    .finally(() => scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message })));
-  runAnalysis();
-  setInterval(runAnalysis, 30 * 60 * 1000); // 30min (was 15min, saves ~50% tokens)
+  // AI-driven scheduling: analyst decides next_check_in after each analysis
+  async function runAnalysisLoop() {
+    try {
+      const nextMin = await pipeline.collectAndAnalyze();
+      const nextMs = (nextMin || 30) * 60 * 1000;
+      log.info('next_analysis_scheduled', { module: 'index', nextMin: nextMin || 30, reason: 'ai_decided' });
+      setTimeout(runAnalysisLoop, nextMs);
+    } catch (err) {
+      log.error('analysis_loop_error', { module: 'index', error: err.message });
+      setTimeout(runAnalysisLoop, 30 * 60 * 1000); // fallback 30min on error
+    }
+    scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
+  }
+  runAnalysisLoop();
   // Check for filled/closed positions every 5 minutes + review pending orders
   setInterval(() => {
     bitgetExec.checkAndSyncTrades().catch(e => log.error('trade_sync_error', { module: 'index', error: e.message }));

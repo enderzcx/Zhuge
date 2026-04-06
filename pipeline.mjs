@@ -90,7 +90,8 @@ Produce a JSON object with these exact fields:
   ],
   "briefing": "<3-4 sentence Chinese briefing for a crypto trader. Actionable, with reasoning. Include specific numbers.>",
   "push_worthy": <true if any alert deserves immediate user notification, false otherwise>,
-  "push_reason": "<if push_worthy, one-line Chinese reason>"
+  "push_reason": "<if push_worthy, one-line Chinese reason>",
+  "next_check_in": "<minutes until next analysis, e.g. '10' or '45' or '120'. YOU decide based on market conditions.>"
 }
 
 Rules:
@@ -98,6 +99,7 @@ Rules:
 - briefing: Chinese only, no English, no markdown. Include specific prices/numbers from data.
 - push_worthy: true only for FLASH-level events (VIX spike, major hack, regulation news, 5%+ price move)
 - Be precise with numbers, don't round excessively
+- next_check_in: YOU decide how soon to check again. Volatile market / FLASH event → 10-15min. Normal → 30-45min. Dead quiet → 60-120min. Max 240min (4h hard cap).
 
 Output ONLY the JSON, no other text.`;
   }
@@ -242,6 +244,11 @@ Output ONLY the JSON, no other text.`;
       _metrics.record('error_count', 1, { module: 'pipeline', type: 'analysis', cycleId });
     }
     c.analyzing = false;
+
+    // Return AI-decided next check interval (or default 30min)
+    const nextMin = parseInt(parsed?.next_check_in) || 30;
+    const clamped = Math.min(Math.max(nextMin, 5), 240); // 5min floor, 4h ceiling
+    return clamped;
   }
 
   // --- Patrol Report (3h summary) ---
@@ -385,7 +392,7 @@ ${summary}
       });
 
       // Run crypto analysis (stock disabled to save tokens)
-      await withSpan(cycleCtx, 'analysis', { mode: 'crypto' }, async () => runFullAnalysis('crypto', crucix, news, cycleId));
+      const nextCheckMin = await withSpan(cycleCtx, 'analysis', { mode: 'crypto' }, async () => runFullAnalysis('crypto', crucix, news, cycleId));
       // await runFullAnalysis('stock', crucix, news, cycleId);
 
       // Score historical signals (non-blocking)
@@ -398,9 +405,11 @@ ${summary}
       await withSpan(cycleCtx, 'momentum', { cycleId }, async () => scanner.runMomentumPipeline(cycleId));
 
       endSpan(cycleSpan);
+      log.info('cycle_next_check', { module: 'pipeline', cycleId, nextCheckMin: nextCheckMin || 30 });
+      return nextCheckMin || 30;
     } catch (err) {
       endSpan(cycleSpan, err);
-      throw err;
+      return 30; // default on error
     }
   }
 
