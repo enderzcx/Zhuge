@@ -1,6 +1,6 @@
-# TradeAgent
+# 诸葛 (Zhuge) — TradeAgent
 
-Autonomous AI trading system — 7 agents, real money, self-learning.
+Autonomous AI trading system — 7 agents, real money, self-learning. Named after Zhuge Liang: observe, plan, act.
 
 ## What It Does
 

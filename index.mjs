@@ -63,7 +63,7 @@ const app = express();
 app.use(express.json());
 
 // --- Create modules ---
-initTracing('tradeagent', process.env.OTEL_ENDPOINT);
+initTracing('zhuge', process.env.OTEL_ENDPOINT);
 const db = createDB();
 const metrics = createMetrics(db.db);
 const { log, readLogs } = createLogger();
