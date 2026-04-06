@@ -196,25 +196,40 @@ ${numbered}
 
   async function postCompound(result) {
     if (!result) return;
-    const text = [
+    const lines = [
       '🧠 Compound Knowledge Update',
       '',
       `Reviewed: ${result.trades} trades`,
-      `New rules: ${result.generated} | Updated: ${result.updated} | Deprecated: ${result.deprecated}`,
-      '',
-      // Show current active rules
-      ...(() => {
-        try {
-          const rules = stmts.compoundRules.all();
-          return rules.map(r => {
-            const icon = r.action === 'avoid' ? '⚠' : r.action === 'prefer' ? '✓' : '~';
-            return `${icon} ${r.description} (${(r.confidence * 100).toFixed(0)}%)`;
-          });
-        } catch { return ['(no rules yet)']; }
-      })(),
-    ].join('\n');
+      `Rules: +${result.generated} new | ~${result.updated} updated | -${result.deprecated} deprecated`,
+    ];
 
-    await _send(text, 'compound');
+    // Strategies
+    if (result.strategiesCreated || result.strategiesUpdated || result.strategiesRetired) {
+      lines.push(`Strategies: +${result.strategiesCreated || 0} | ~${result.strategiesUpdated || 0} | -${result.strategiesRetired || 0}`);
+    }
+
+    // Knowledge feedback
+    if (result.knowledgeBoosted || result.knowledgeDemoted) {
+      lines.push(`Knowledge: +${result.knowledgeBoosted || 0} boosted | -${result.knowledgeDemoted || 0} demoted`);
+      if (result.knowledgeFeedback?.length > 0) {
+        for (const fb of result.knowledgeFeedback.slice(0, 5)) {
+          const icon = fb.action === 'boost' ? '↑' : '↓';
+          lines.push(`  ${icon} ${fb.title} (${fb.delta > 0 ? '+' : ''}${fb.delta}): ${(fb.reason || '').slice(0, 60)}`);
+        }
+      }
+    }
+
+    lines.push('');
+    // Show current active rules
+    try {
+      const rules = stmts.compoundRules.all();
+      rules.forEach(r => {
+        const icon = r.action === 'avoid' ? '⚠' : r.action === 'prefer' ? '✓' : '~';
+        lines.push(`${icon} ${r.description} (${(r.confidence * 100).toFixed(0)}%)`);
+      });
+    } catch { lines.push('(no rules yet)'); }
+
+    await _send(lines.join('\n'), 'compound');
   }
 
   // === PnL Chart (quickchart.io) ===

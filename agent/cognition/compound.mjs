@@ -24,7 +24,7 @@ const STRATEGY_BOUNDS = {
 const VALID_OPERATORS = new Set(['gt', 'lt', 'gte', 'lte', 'eq', 'between', 'in']);
 const VALID_DIRECTIONS = new Set(['long', 'short', 'both']);
 
-export function createCompound({ db, llm, provenance, log, metrics }) {
+export function createCompound({ db, llm, provenance, log, metrics, rag }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
 
@@ -168,6 +168,12 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       errorCount = r.total || 0;
     } catch {}
 
+    // 7. RAG knowledge entries (for feedback loop)
+    let knowledgeEntries = [];
+    try {
+      if (rag?.getAll) knowledgeEntries = await rag.getAll({ limit: 30 });
+    } catch {}
+
     // --- Build comprehensive review prompt ---
 
     const systemReview = [
@@ -177,6 +183,7 @@ export function createCompound({ db, llm, provenance, log, metrics }) {
       analystActions.length > 0 ? `Analyst 行动分布 (7天):\n${analystActions.map(a => `  ${a.recommended_action}: ${a.cnt}次, 平均confidence ${a.avg_conf}`).join('\n')}` : '',
       errorCount > 0 ? `系统错误: ${errorCount}次 (7天)` : '',
       strategyPerf.length > 0 ? `AI 策略表现:\n${strategyPerf.map(s => `  ${s.name} (${s.id}): ${s.trades}笔, 胜率${s.winRate}, PnL ${s.pnl} USDT`).join('\n')}` : '',
+      knowledgeEntries.length > 0 ? `知识库条目 (${knowledgeEntries.length}条):\n${knowledgeEntries.map(e => `  [${e.category}] ${e.title} (confidence: ${e.confidence})`).join('\n')}` : '',
     ].filter(Boolean).join('\n\n');
 
     const prompt = `你是一个交易系统复盘专家。你要复盘的不只是交易结果，还有整个决策流程和系统表现。
@@ -253,6 +260,13 @@ entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用
 最多 3 个新策略。已有策略表现差（胜率<30%且>=5笔）应设 status: "superseded"。
 
 如果你觉得当前数据不足以支撑完整策略，可以只输出 rules 不输出 strategies。
+
+你还要评估知识库条目的有效性。基于交易数据，判断哪些知识对交易有帮助、哪些没用。
+输出 knowledge_feedback 数组:
+  { "title": "知识条目的完整标题", "action": "boost | demote | neutral", "delta": 10, "reason": "原因" }
+  delta 范围 -15 到 +15。boost = 该知识被验证有效(+5~+15)，demote = 无效或误导(-5~-15)，neutral = 不做调整(delta=0)。
+  只评价你有数据支撑的条目，没把握的不要评。
+
 仅输出 JSON，不要其他文字。`;
 
     const start = Date.now();
@@ -270,9 +284,10 @@ entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用
 
     _m.record('llm_latency_ms', Date.now() - start, { module: 'compound' });
 
-    // Parse output — supports both old (array of rules) and new ({ rules, strategies })
+    // Parse output — supports both old (array of rules) and new ({ rules, strategies, knowledge_feedback })
     let rules = [];
     let strategies = [];
+    let llmKnowledgeFeedback = [];
     try {
       const content = (result.content || result).replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const parsed = JSON.parse(content);
@@ -281,6 +296,7 @@ entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用
       } else if (parsed && typeof parsed === 'object') {
         rules = Array.isArray(parsed.rules) ? parsed.rules : [];
         strategies = Array.isArray(parsed.strategies) ? parsed.strategies : [];
+        llmKnowledgeFeedback = Array.isArray(parsed.knowledge_feedback) ? parsed.knowledge_feedback : [];
       } else {
         throw new Error('Unexpected format');
       }
@@ -386,6 +402,28 @@ entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用
       if (promoted.changes > 0) _log.info('strategies_auto_activated', { module: 'compound', count: promoted.changes });
     } catch {}
 
+    // --- Knowledge feedback: update RAG confidence based on LLM evaluation ---
+    let knowledgeBoosted = 0, knowledgeDemoted = 0;
+    const knowledgeFeedback = [];
+    if (rag?.updateConfidence) {
+      const feedback = llmKnowledgeFeedback;
+      for (const fb of feedback) {
+        if (!fb.title || !fb.delta || fb.action === 'neutral') continue;
+        const delta = Math.min(15, Math.max(-15, fb.delta || 0));
+        try {
+          await rag.updateConfidence(fb.title, delta);
+          if (delta > 0) knowledgeBoosted++;
+          else knowledgeDemoted++;
+          knowledgeFeedback.push({ title: fb.title, action: fb.action, delta, reason: fb.reason });
+        } catch (err) {
+          _log.warn('knowledge_feedback_failed', { module: 'compound', title: fb.title, error: err.message });
+        }
+      }
+      if (knowledgeBoosted + knowledgeDemoted > 0) {
+        _log.info('knowledge_feedback_applied', { module: 'compound', boosted: knowledgeBoosted, demoted: knowledgeDemoted });
+      }
+    }
+
     // Update run stats
     db.prepare('UPDATE compound_runs SET rules_generated = ?, rules_updated = ?, rules_deprecated = ? WHERE id = ?')
       .run(generated, updated, deprecated, compoundId);
@@ -395,11 +433,12 @@ entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用
       trades: trades.length,
       generated, updated, deprecated,
       strategies_created: strategiesCreated, strategies_updated: strategiesUpdated, strategies_retired: strategiesRetired,
+      knowledge_boosted: knowledgeBoosted, knowledge_demoted: knowledgeDemoted,
       duration_ms: Date.now() - start,
     });
     _m.record('compound_run', 1, { trades: trades.length, rules: generated + updated, strategies: strategiesCreated + strategiesUpdated });
 
-    return { trades: trades.length, generated, updated, deprecated, strategiesCreated, strategiesUpdated, strategiesRetired };
+    return { trades: trades.length, generated, updated, deprecated, strategiesCreated, strategiesUpdated, strategiesRetired, knowledgeBoosted, knowledgeDemoted, knowledgeFeedback };
   }
 
   /**

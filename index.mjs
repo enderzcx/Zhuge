@@ -103,7 +103,7 @@ const agentHistory = createHistory({ llm });
 const modelSelector = createModelSelector(config);
 const toolRegistry = createToolRegistry();
 const agentProvenance = createProvenance({ db: db.db, log });
-const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenance, log, metrics });
+const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenance, log, metrics, rag: { getAll: (...a) => _ragRef.instance?.getAll(...a) || [], updateConfidence: (...a) => _ragRef.instance?.updateConfidence(...a) } });
 _compoundRef.instance = agentCompound; // wire into scanner via getter
 
 // --- RAG Knowledge Base ---

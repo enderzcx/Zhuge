@@ -92,15 +92,20 @@ export function createRAG({ config, log }) {
     }
     try {
       const results = await q.toArray();
-      return results.map(r => ({
-        title: r.title,
-        content: r.content,
-        category: r.category,
-        tags: r.tags,
-        source: r.source,
-        confidence: r.confidence,
-        score: r._distance != null ? +(1 / (1 + r._distance)).toFixed(3) : null, // normalize to 0-1
-      }));
+      const mapped = results
+        .map(r => ({
+          title: r.title,
+          content: r.content,
+          category: r.category,
+          tags: r.tags,
+          source: r.source,
+          confidence: r.confidence ?? 50,
+          score: r._distance != null ? +(1 / (1 + r._distance)).toFixed(3) : null,
+        }))
+        .filter(r => r.confidence >= 10); // filter out demoted entries
+      // Re-sort: vector similarity * confidence weight (higher confidence = higher rank)
+      mapped.sort((a, b) => ((b.score || 0) * (b.confidence / 50)) - ((a.score || 0) * (a.confidence / 50)));
+      return mapped;
     } catch (err) {
       _log.error('rag_search_failed', { module: 'rag', error: err.message });
       return [];
@@ -134,11 +139,38 @@ export function createRAG({ config, log }) {
   // --- Update confidence (compound feedback loop) ---
 
   async function updateConfidence(title, delta) {
-    if (!table) return;
+    if (!table || !title) return;
+    // Clamp delta to ±15 per update (safety: prevent single LLM hallucination from destroying knowledge)
+    const safeDelta = Math.min(15, Math.max(-15, delta));
+    const escaped = title.replace(/'/g, "''");
     try {
-      await table.update({ filter: `title = '${title}'`, values: { confidence: delta } });
+      // Read current confidence, then apply delta
+      const rows = await table.search([...Array(EMBED_DIM).fill(0)])
+        .where(`title = '${escaped}'`).limit(1).select(['confidence']).toArray();
+      const current = rows[0]?.confidence ?? 50;
+      const newConf = Math.min(100, Math.max(0, current + safeDelta));
+      await table.update({ where: `title = '${escaped}'`, values: { confidence: newConf } });
+      _log.info('rag_confidence_updated', { module: 'rag', title, from: current, to: newConf, delta: safeDelta });
     } catch (err) {
       _log.warn('rag_confidence_update_failed', { module: 'rag', title, error: err.message });
+    }
+  }
+
+  // --- Get all entries (for compound feedback loop) ---
+
+  async function getAll({ limit = 50 } = {}) {
+    if (!table) return [];
+    try {
+      // Use query() for full table scan instead of vector search against zero embedding
+      const rows = await table.query().select(['title', 'category', 'confidence', 'tags']).limit(limit).toArray();
+      return rows.map(r => ({ title: r.title, category: r.category, confidence: r.confidence ?? 50, tags: r.tags }));
+    } catch {
+      // Fallback: some LanceDB versions don't support query(), use vector search
+      try {
+        const rows = await table.search([...Array(EMBED_DIM).fill(0)])
+          .limit(limit).select(['title', 'category', 'confidence', 'tags']).toArray();
+        return rows.map(r => ({ title: r.title, category: r.category, confidence: r.confidence ?? 50, tags: r.tags }));
+      } catch { return []; }
     }
   }
 
@@ -152,5 +184,5 @@ export function createRAG({ config, log }) {
     return { count: rows.length, categories: cats };
   }
 
-  return { init, add, search, seed, updateConfidence, stats };
+  return { init, add, search, seed, updateConfidence, getAll, stats };
 }
