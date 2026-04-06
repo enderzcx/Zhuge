@@ -108,7 +108,7 @@ _compoundRef.instance = agentCompound; // wire into scanner via getter
 // --- RAG Knowledge Base ---
 const rag = createRAG({ config, log });
 await rag.init();
-rag.seed('data/seed-knowledge.json').catch(e => log.warn('rag_seed_failed', { module: 'index', error: e.message }));
+await rag.seed('data/seed-knowledge.json').catch(e => log.warn('rag_seed_failed', { module: 'index', error: e.message }));
 
 // Register tools
 const systemTools = createSystemTools({ log });

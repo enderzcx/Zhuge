@@ -80,12 +80,17 @@ export function createRAG({ config, log }) {
 
   // --- Search knowledge ---
 
+  const VALID_CATEGORIES = ['strategy', 'indicator', 'risk_rule', 'case', 'market', 'general'];
+
   async function search(query, { limit = 5, category } = {}) {
-    if (!table) return [];
+    if (!table) throw new Error('Knowledge store not initialized (Ollama running?)');
+    const safeLimit = Math.min(Math.max(limit || 5, 1), 20);
+    const queryVec = await embed(query);
+    let q = table.search(queryVec).limit(safeLimit);
+    if (category && VALID_CATEGORIES.includes(category)) {
+      q = q.where(`category = '${category}'`);
+    }
     try {
-      const queryVec = await embed(query);
-      let q = table.search(queryVec).limit(limit);
-      if (category) q = q.where(`category = '${category}'`);
       const results = await q.toArray();
       return results.map(r => ({
         title: r.title,
