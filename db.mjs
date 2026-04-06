@@ -318,6 +318,16 @@ export function createDB() {
       superseded_at TEXT,
       superseded_by TEXT
     );
+    -- Backtest candles: historical data for strategy validation
+    CREATE TABLE IF NOT EXISTS backtest_candles (
+      pair TEXT NOT NULL,
+      timeframe TEXT NOT NULL DEFAULT '1H',
+      ts INTEGER NOT NULL,
+      open REAL, high REAL, low REAL, close REAL, volume REAL,
+      UNIQUE(pair, timeframe, ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bt_candles ON backtest_candles(pair, timeframe, ts);
+
     -- Dream runs: memory consolidation history
     CREATE TABLE IF NOT EXISTS dream_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

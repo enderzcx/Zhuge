@@ -190,9 +190,54 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       },
       requiresConfirmation: false,
     },
+    {
+      name: 'run_backtest',
+      description: '对 AI 策略进行历史回测。用 Bitget 历史 K 线数据验证策略表现（胜率/PnL/回撤）。不用 LLM，纯确定性回放。',
+      parameters: {
+        type: 'object',
+        properties: {
+          strategy_id: { type: 'string', description: '要回测的 compound strategy ID' },
+          symbol: { type: 'string', description: '交易对 (默认 BTCUSDT)' },
+          days: { type: 'number', description: '回测天数 (默认 30)' },
+          timeframe: { type: 'string', description: '时间框架 (默认 1H)' },
+        },
+        required: ['strategy_id'],
+      },
+      requiresConfirmation: false,
+    },
   ];
 
   const EXECUTORS = {
+    async run_backtest({ strategy_id, symbol = 'BTCUSDT', days = 30, timeframe = '1H' } = {}) {
+      if (!strategy_id) return JSON.stringify({ error: 'strategy_id required' });
+      try {
+        const { loadCandles, candleCount } = await import('../../backtest/loader.mjs');
+        const { runBacktest } = await import('../../backtest/engine.mjs');
+        const rawDb = db.db || db;
+
+        // Check if we have enough data, auto-load if not
+        const existing = candleCount(rawDb, symbol, timeframe);
+        const endTs = Date.now();
+        const startTs = endTs - days * 86400000;
+        if (existing.count < days * 24) {
+          await loadCandles(rawDb, symbol, timeframe, startTs, endTs);
+        }
+
+        const result = runBacktest({ db: rawDb, symbol, timeframe, strategyId: strategy_id, startTs, endTs });
+        return JSON.stringify({
+          strategy_id, symbol, timeframe, days,
+          candles: result.candleCount,
+          stats: result.stats,
+          report: result.report,
+          trades_sample: result.trades.slice(-5).map(t => ({
+            side: t.side, entry: t.entryPrice, exit: t.exitPrice, pnl: t.pnl?.toFixed(2), reason: t.reason,
+          })),
+        });
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    },
+
     async list_compound_strategies({ status } = {}) {
       try {
         const filter = status === 'all' ? '' : `WHERE status = '${status || 'active'}'`;

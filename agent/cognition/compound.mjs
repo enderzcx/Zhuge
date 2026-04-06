@@ -388,7 +388,29 @@ entry_conditions 用 AND 逻辑（全部满足才入场），exit_conditions 用
 
         if (s.status === 'superseded' || status === 'retired') strategiesRetired++;
         else if (existing) strategiesUpdated++;
-        else strategiesCreated++;
+        else {
+          strategiesCreated++;
+          // Auto-backtest new strategies — retire immediately if terrible
+          try {
+            const { runBacktest } = await import('../../backtest/engine.mjs');
+            const { loadCandles, candleCount } = await import('../../backtest/loader.mjs');
+            const testSymbol = (s.symbols?.[0]) || 'BTCUSDT';
+            const endTs = Date.now();
+            const startTs = endTs - 14 * 86400000; // 14 days
+            const cc = candleCount(db, testSymbol, '1H');
+            if (cc.count < 200) await loadCandles(db, testSymbol, '1H', startTs, endTs);
+            const bt = runBacktest({ db, symbol: testSymbol, timeframe: '1H', strategyId: s.strategy_id, startTs, endTs, initialBalance: 100 });
+            const winRate = bt.stats.totalTrades > 0 ? bt.stats.wins / bt.stats.totalTrades : 0;
+            _log.info('strategy_auto_backtest', { module: 'compound', strategy_id: s.strategy_id, trades: bt.stats.totalTrades, winRate: (winRate * 100).toFixed(0) + '%', pnl: bt.stats.totalPnl });
+            if (bt.stats.totalTrades >= 3 && winRate < 0.2) {
+              db.prepare("UPDATE compound_strategies SET status = 'retired', retired_at = datetime('now'), retired_reason = ? WHERE strategy_id = ?")
+                .run(`backtest: ${bt.stats.totalTrades} trades, ${(winRate * 100).toFixed(0)}% win rate`, s.strategy_id);
+              strategiesRetired++;
+              strategiesCreated--;
+              _log.info('strategy_backtest_retired', { module: 'compound', strategy_id: s.strategy_id });
+            }
+          } catch (btErr) { _log.warn('strategy_backtest_failed', { module: 'compound', strategy_id: s.strategy_id, error: btErr.message }); }
+        }
       } catch (err) {
         _log.warn('compound_strategy_insert_failed', { module: 'compound', strategy_id: s.strategy_id, error: err.message });
       }
