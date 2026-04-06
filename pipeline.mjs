@@ -3,6 +3,8 @@
  * Extracted from vps-api-index.mjs lines ~1162-1424, ~2053-2072, ~2329-2355.
  */
 
+import { startRootSpan, withSpan, endSpan } from './agent/observe/tracing.mjs';
+
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
 export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine }) {
@@ -354,38 +356,51 @@ ${summary}
 
   async function collectAndAnalyze() {
     const cycleId = `cycle_${Date.now()}`;
+    const { span: cycleSpan, ctx: cycleCtx } = startRootSpan('pipeline_cycle', { cycleId });
     log.info('collecting_data', { module: 'pipeline', cycleId });
     const _collectStart = Date.now();
 
-    // Scanner: broad market scan for logging/monitoring (analyst uses its own tools for BTC/ETH/SOL)
-    let marketScanCount = 0;
     try {
-      const opps = await scanMarketOpportunities();
-      marketScanCount = opps.length;
-    } catch (e) { log.error('scanner_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'scanner', cycleId }); }
+      // --- Data collection wrapped in span ---
+      const { crucix, news, marketScanCount } = await withSpan(cycleCtx, 'data_collect', { cycleId }, async () => {
+        // Scanner: broad market scan for logging/monitoring (analyst uses its own tools for BTC/ETH/SOL)
+        let _marketScanCount = 0;
+        try {
+          const opps = await scanMarketOpportunities();
+          _marketScanCount = opps.length;
+        } catch (e) { log.error('scanner_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'scanner', cycleId }); }
 
-    const _fetchStart = Date.now();
-    const [crucix, news] = await Promise.all([fetchCrucix(), fetchNews()]);
-    const newsCount = Array.isArray(news) ? news.length : 0;
-    _metrics.record('data_collect_ms', Date.now() - _fetchStart, { news: newsCount, cycleId });
-    _metrics.record('collect_cycle_ms', Date.now() - _collectStart, { news: newsCount, scan: marketScanCount, cycleId });
-    log.info('data_collected', { module: 'pipeline', cycleId, crucix: !!crucix, news: newsCount, marketScan: marketScanCount });
+        const _fetchStart = Date.now();
+        const [_crucix, _news] = await Promise.all([fetchCrucix(), fetchNews()]);
+        const _newsCount = Array.isArray(_news) ? _news.length : 0;
+        _metrics.record('data_collect_ms', Date.now() - _fetchStart, { news: _newsCount, cycleId });
+        _metrics.record('collect_cycle_ms', Date.now() - _collectStart, { news: _newsCount, scan: _marketScanCount, cycleId });
+        log.info('data_collected', { module: 'pipeline', cycleId, crucix: !!_crucix, news: _newsCount, marketScan: _marketScanCount });
 
-    // Persist raw news
-    if (newsCount > 0) persistNews(news);
+        // Persist raw news
+        if (_newsCount > 0) persistNews(_news);
 
-    // Run crypto analysis (stock disabled to save tokens)
-    await runFullAnalysis('crypto', crucix, news, cycleId);
-    // await runFullAnalysis('stock', crucix, news, cycleId);
+        return { crucix: _crucix, news: _news, marketScanCount: _marketScanCount };
+      });
 
-    // Score historical signals (non-blocking)
-    try { scoreHistoricalSignals(); } catch (e) { log.error('signal_score_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'signal_score', cycleId }); }
+      // Run crypto analysis (stock disabled to save tokens)
+      await withSpan(cycleCtx, 'analysis', { mode: 'crypto' }, async () => runFullAnalysis('crypto', crucix, news, cycleId));
+      // await runFullAnalysis('stock', crucix, news, cycleId);
 
-    // Update source scores monthly
-    try { updateSourceScores(); } catch (e) { log.error('source_score_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'source_score', cycleId }); }
+      // Score historical signals (non-blocking)
+      try { scoreHistoricalSignals(); } catch (e) { log.error('signal_score_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'signal_score', cycleId }); }
 
-    // Momentum: discover + research + trade new/trending coins
-    try { await scanner.runMomentumPipeline(cycleId); } catch (e) { log.error('momentum_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'momentum', cycleId }); }
+      // Update source scores monthly
+      try { updateSourceScores(); } catch (e) { log.error('source_score_error', { module: 'pipeline', cycleId, error: e.message }); _metrics.record('error_count', 1, { module: 'pipeline', type: 'source_score', cycleId }); }
+
+      // Momentum: discover + research + trade new/trending coins
+      await withSpan(cycleCtx, 'momentum', { cycleId }, async () => scanner.runMomentumPipeline(cycleId));
+
+      endSpan(cycleSpan);
+    } catch (err) {
+      endSpan(cycleSpan, err);
+      throw err;
+    }
   }
 
   // --- Graduated Scaling: per-symbol decision logic ---

@@ -13,6 +13,10 @@
   "private": true,
   "dependencies": {
     "@lifi/sdk": "^3.16.3",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.214.0",
+    "@opentelemetry/sdk-node": "^0.214.0",
+    "@opentelemetry/semantic-conventions": "^1.40.0",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.4.0",
     "express": "^5.1.0",

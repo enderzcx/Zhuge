@@ -2,6 +2,8 @@
  * Generic agent runner: LLM with tool-calling loop.
  */
 
+import { startRootSpan, endSpan } from '../agent/observe/tracing.mjs';
+
 export function createAgentRunner({ config, db, messageBus, metrics, log }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { insertDecision } = db;
@@ -35,13 +37,14 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
     let totalTokens = 0;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+
+    const agentModel = opts.model || config.AGENT_MODELS[agentName] || config.LLM_MODEL;
+    const { span: agentSpan } = startRootSpan(`agent:${agentName}`, { model: agentModel });
     const messages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage },
     ];
     const allToolCalls = [];
-
-    const agentModel = opts.model || config.AGENT_MODELS[agentName] || config.LLM_MODEL;
 
     try {
     for (let round = 0; round < maxRounds; round++) {
@@ -90,6 +93,7 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
         metrics?.record('llm_latency_ms', totalMs, { agent: agentName, model: agentModel, rounds: round + 1 });
         metrics?.record('llm_tokens_in', totalInputTokens, { agent: agentName });
         metrics?.record('llm_tokens_out', totalOutputTokens, { agent: agentName });
+        endSpan(agentSpan);
         return { content: msg.content || '', toolCalls: allToolCalls, trace_id: traceId };
       }
 
@@ -128,11 +132,13 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
     metrics?.record('llm_latency_ms', totalMs, { agent: agentName, model: agentModel, rounds: maxRounds });
     metrics?.record('llm_tokens_in', totalInputTokens, { agent: agentName });
     metrics?.record('llm_tokens_out', totalOutputTokens, { agent: agentName });
+    endSpan(agentSpan);
     return { content: lastContent, toolCalls: allToolCalls, trace_id: traceId };
 
     } catch (err) {
       recordMetric(agentName, Date.now() - agentStart, totalTokens, true);
       metrics?.record('llm_error', 1, { agent: agentName, error: err.message?.slice(0, 100) });
+      endSpan(agentSpan, err);
       throw err;
     }
   }

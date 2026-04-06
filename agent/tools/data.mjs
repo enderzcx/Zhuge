@@ -1,9 +1,13 @@
 /**
  * Data tools — market data queries via TG agent.
- *   crucix_data, fetch_news, market_scan, price, agent_decisions
+ *   crucix_data, fetch_news, market_scan, price, agent_decisions,
+ *   explore_codebase, query_metrics, read_logs, status_report
  */
 
-export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound }) {
+import { readdirSync, readFileSync, statSync } from 'fs';
+import { join } from 'path';
+
+export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { priceCache } = priceStream;
 
@@ -98,6 +102,40 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       name: 'status_report',
       description: '一键状态报告: 持仓 + PnL + 余额 + 系统资源 + 最近错误 + compound规则',
       parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'explore_codebase',
+      description: '扫描项目代码结构: 所有模块、子 agent、自动化任务、依赖。用来了解"我是谁、我控制什么"',
+      parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'query_metrics',
+      description: '查询可观测性指标 (系统资源/LLM延迟/API延迟/错误数等)。可聚合、过滤',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '指标名 (system_heap_mb, llm_latency_ms, bitget_api_latency_ms, error_count 等)' },
+          since_hours: { type: 'number', description: '查最近 N 小时 (默认1)' },
+          agg: { type: 'string', description: '聚合方式: avg, sum, count, min, max, raw (默认 avg)' },
+          limit: { type: 'number', description: 'raw 模式下最多返回条数 (默认20)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'read_logs',
+      description: '读取结构化日志。可按级别、模块、时间过滤',
+      parameters: {
+        type: 'object',
+        properties: {
+          level: { type: 'string', description: '最低级别: debug/info/warn/error (默认 info)' },
+          module: { type: 'string', description: '按模块过滤 (pipeline, scanner, momentum, bitget_exec 等)' },
+          since_hours: { type: 'number', description: '查最近 N 小时 (默认1)' },
+          limit: { type: 'number', description: '最多返回条数 (默认20)' },
+        },
+      },
       requiresConfirmation: false,
     },
   ];
@@ -284,6 +322,115 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         } catch {}
 
         return parts.join('\n\n');
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    },
+
+    async explore_codebase() {
+      try {
+        const root = process.cwd();
+        const parts = [];
+
+        // 1. Project info
+        try {
+          const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+          parts.push(`项目: ${pkg.name} v${pkg.version}\n依赖: ${Object.keys(pkg.dependencies || {}).join(', ')}`);
+        } catch {}
+
+        // 2. File tree with line counts
+        const modules = [];
+        function scanDir(dir, prefix = '') {
+          try {
+            for (const f of readdirSync(dir)) {
+              if (f.startsWith('.') || f === 'node_modules' || f === 'data') continue;
+              const full = join(dir, f);
+              const stat = statSync(full);
+              if (stat.isDirectory()) scanDir(full, prefix + f + '/');
+              else if (f.endsWith('.mjs') || f.endsWith('.md')) {
+                const lines = readFileSync(full, 'utf-8').split('\n').length;
+                modules.push({ path: prefix + f, lines });
+              }
+            }
+          } catch {}
+        }
+        scanDir(root);
+        const tree = modules.sort((a, b) => b.lines - a.lines).map(m => `  ${m.path} (${m.lines}行)`).join('\n');
+        parts.push(`文件 (${modules.length}个, ${modules.reduce((s, m) => s + m.lines, 0)}行):\n${tree}`);
+
+        // 3. Sub-agents — read first comment block from each
+        const agentDir = join(root, 'agents');
+        const agentFiles = readdirSync(agentDir).filter(f => f.endsWith('.mjs'));
+        const agentDescs = agentFiles.map(f => {
+          const content = readFileSync(join(agentDir, f), 'utf-8');
+          const comment = content.match(/\/\*\*?\s*\n?\s*\*?\s*(.+?)[\n*]/)?.[1]?.trim() || f;
+          return `  ${f}: ${comment}`;
+        });
+        parts.push(`子 Agent (${agentFiles.length}个):\n${agentDescs.join('\n')}`);
+
+        // 4. Automation schedule
+        parts.push(`自动化:\n  pipeline: 每30分钟 (analyst→risk→trade→strategist)\n  scanner: 每30分钟 (momentum 发现+研究+交易)\n  pending_review: 每5分钟 (订单同步)\n  dashboard: positions每5min, observe每2h, chart每6h\n  health: 每60秒采集 (heap/rss/cpu/event_loop)\n  compound: 每10笔交易关闭后自动复盘`);
+
+        // 5. PM2 processes
+        try {
+          const { execSync } = await import('child_process');
+          const pm2 = execSync('pm2 jlist', { encoding: 'utf-8', timeout: 5000 });
+          const procs = JSON.parse(pm2).map(p => `  ${p.name}: ${p.pm2_env.status} | mem:${Math.round(p.monit.memory / 1024 / 1024)}MB | uptime:${Math.round((Date.now() - p.pm2_env.pm_uptime) / 3600000)}h`);
+          parts.push(`PM2 进程:\n${procs.join('\n')}`);
+        } catch {}
+
+        return parts.join('\n\n');
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    },
+
+    async query_metrics({ name, since_hours, agg, limit } = {}) {
+      try {
+        if (!name) {
+          // List all metric names with counts
+          const names = db.prepare('SELECT name, COUNT(*) as cnt FROM metrics GROUP BY name ORDER BY cnt DESC').all();
+          return names.map(n => `${n.name}: ${n.cnt} records`).join('\n');
+        }
+        const since = Date.now() - (since_hours || 1) * 3600000;
+        const mode = agg || 'avg';
+
+        if (mode === 'raw') {
+          const rows = db.prepare('SELECT ts, value, tags FROM metrics WHERE name = ? AND ts > ? ORDER BY ts DESC LIMIT ?')
+            .all(name, since, limit || 20);
+          return JSON.stringify(rows.map(r => ({ ts: new Date(r.ts).toISOString(), value: r.value, tags: r.tags })));
+        }
+
+        const aggMap = { avg: 'AVG(value)', sum: 'SUM(value)', count: 'COUNT(*)', min: 'MIN(value)', max: 'MAX(value)' };
+        const fn = aggMap[mode] || 'AVG(value)';
+        const row = db.prepare(`SELECT ${fn} as result, COUNT(*) as cnt FROM metrics WHERE name = ? AND ts > ?`).get(name, since);
+        return `${name} (${mode}, ${since_hours || 1}h): ${typeof row.result === 'number' ? row.result.toFixed(2) : row.result} (${row.cnt} samples)`;
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    },
+
+    async read_logs({ level, module, since_hours, limit: maxLines } = {}) {
+      try {
+        if (readLogs) {
+          const since = new Date(Date.now() - (since_hours || 1) * 3600000).toISOString();
+          const entries = readLogs({ limit: maxLines || 20, level: level || 'info', module, since });
+          return entries.map(e => `[${e.ts?.split('T')[1]?.slice(0, 8) || '?'}] ${e.level} ${e.event} ${e.module ? '(' + e.module + ')' : ''} ${e.error || ''}`).join('\n');
+        }
+        // Fallback: read log file directly
+        const { readdirSync: rd, readFileSync: rf } = await import('fs');
+        const logDir = join(process.cwd(), 'data', 'logs');
+        const files = rd(logDir).filter(f => f.endsWith('.jsonl')).sort().reverse();
+        if (!files.length) return 'No log files found';
+        const lines = rf(join(logDir, files[0]), 'utf-8').trim().split('\n').slice(-(maxLines || 20));
+        const parsed = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        const filtered = parsed.filter(e => {
+          if (module && e.module !== module) return false;
+          if (level === 'error' && e.level !== 'error') return false;
+          if (level === 'warn' && !['warn', 'error'].includes(e.level)) return false;
+          return true;
+        });
+        return filtered.map(e => `[${e.ts?.split('T')[1]?.slice(0, 8) || '?'}] ${e.level} ${e.event} ${e.module ? '(' + e.module + ')' : ''} ${e.error || ''}`).join('\n') || 'No matching logs';
       } catch (err) {
         return `Error: ${err.message}`;
       }

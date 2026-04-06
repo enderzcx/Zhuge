@@ -28,6 +28,7 @@ import { createPipeline } from './pipeline.mjs';
 import { createMetrics } from './agent/observe/metrics.mjs';
 import { createLogger } from './agent/observe/logger.mjs';
 import { createHealthMonitor } from './agent/observe/health.mjs';
+import { initTracing, shutdownTracing } from './agent/observe/tracing.mjs';
 // Agent Harness — TG Agent
 import { createAgentLLM } from './agent/llm.mjs';
 import { createHistory } from './agent/history.mjs';
@@ -62,9 +63,10 @@ const app = express();
 app.use(express.json());
 
 // --- Create modules ---
+initTracing('tradeagent', process.env.OTEL_ENDPOINT);
 const db = createDB();
 const metrics = createMetrics(db.db);
-const { log } = createLogger();
+const { log, readLogs } = createLogger();
 // alertFn wired after pushEngine creation below
 const _alertRef = { fn: null };
 const health = createHealthMonitor(metrics, { log, alertFn: (msg) => _alertRef.fn?.(msg) });
@@ -110,7 +112,7 @@ const _pushRef = { engine: null };
 const dataTools = createDataTools({
   dataSources, priceStream, db: db.db, scanner,
   pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
-  compound: agentCompound,
+  compound: agentCompound, readLogs,
 });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log });
@@ -221,6 +223,8 @@ app.listen(config.PORT, () => {
       // Sync trades one last time (detect fills before exit)
       await bitgetExec.checkAndSyncTrades().catch(() => {});
       log.info('shutdown_done', { module: 'index', signal });
+      // Flush OTel traces before closing
+      await shutdownTracing().catch(() => {});
       // Close DB (flushes WAL) — must be after final log write
       if (db.db?.close) db.db.close();
     } catch (e) {

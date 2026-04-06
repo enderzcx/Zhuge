@@ -3,6 +3,7 @@
  */
 
 import { createHmac } from 'crypto';
+import { startRootSpan, endSpan } from '../agent/observe/tracing.mjs';
 
 export function createBitgetClient(config, { metrics, log } = {}) {
   let _consecutiveFailures = 0;
@@ -13,10 +14,12 @@ export function createBitgetClient(config, { metrics, log } = {}) {
   }
 
   async function bitgetRequest(method, path, body = null) {
+    const { span } = startRootSpan(`bitget:${path.split('?')[0]}`, { method });
     const ts = String(Date.now());
     const bodyStr = body ? JSON.stringify(body) : '';
     const sig = bitgetSign(ts, method, path, bodyStr);
     const start = Date.now();
+    try {
     const res = await fetch(`${config.BITGET_BASE}${path}`, {
       method,
       headers: {
@@ -43,18 +46,30 @@ export function createBitgetClient(config, { metrics, log } = {}) {
       throw new Error(`Bitget ${data.code}: ${data.msg}`);
     }
     _consecutiveFailures = 0;
+    endSpan(span);
     return data.data;
+    } catch (e) {
+      endSpan(span, e);
+      throw e;
+    }
   }
 
   async function bitgetPublic(path) {
+    const { span } = startRootSpan(`bitget:${path.split('?')[0]}`, { method: 'GET' });
     const start = Date.now();
+    try {
     const res = await fetch(`${config.BITGET_BASE}${path}`, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
     const latency = Date.now() - start;
     metrics?.record('bitget_api_latency_ms', latency, { method: 'GET', path: path.split('?')[0] });
     if (data.code && data.code !== '00000') throw new Error(`Bitget ${data.code}: ${data.msg}`);
     _consecutiveFailures = 0;
+    endSpan(span);
     return data.data;
+    } catch (e) {
+      endSpan(span, e);
+      throw e;
+    }
   }
 
   // ── Symbol info cache (tick size / price precision) ──────────────────
