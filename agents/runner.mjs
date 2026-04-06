@@ -69,6 +69,7 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
           signal: AbortSignal.timeout(opts.timeout || 30000),
         });
         if ((r.status === 402 || r.status === 429 || r.status >= 500) && attempt < 2) {
+          metrics?.record('llm_retry', 1, { agent: agentName, status: r.status, attempt: attempt + 1 });
           const base = 3000 * (attempt + 1);
           const jitter = Math.floor(Math.random() * 1500);
           await new Promise(ok => setTimeout(ok, base + jitter));
@@ -108,11 +109,13 @@ export function createAgentRunner({ config, db, messageBus, metrics, log }) {
         catch { args = {}; _log.warn('json_parse_failed', { module: 'runner', agent: agentName, tool: fnName, raw: (tc.function.arguments || '').slice(0, 100) }); }
         const executor = toolExecutors[fnName];
         let result;
+        const toolStart = Date.now();
         if (executor) {
           try { result = await executor(args); } catch (e) { result = JSON.stringify({ error: e.message }); }
         } else {
           result = JSON.stringify({ error: `Unknown tool: ${fnName}` });
         }
+        metrics?.record('agent_tool_ms', Date.now() - toolStart, { agent: agentName, tool: fnName });
 
         allToolCalls.push({ name: fnName, args, result });
         messages.push({ role: 'tool', tool_call_id: tc.id, content: typeof result === 'string' ? result : JSON.stringify(result) });

@@ -31,7 +31,7 @@ const MAX_DELETES = 3;
 const MAX_MERGES = 3;
 const MAX_CREATES = 2;
 
-export function createDream({ db, llm, log, metrics }) {
+export function createDream({ db, llm, log, metrics, onComplete }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
   let _timer = null;
@@ -203,7 +203,9 @@ ${directives.slice(0, 400) || '(empty)'}
       _log.info('dream_complete', { module: 'dream', notes: notes.length, merged, deleted, created, duration_ms: Date.now() - start });
       _m.record('dream_run', 1, { notes: notes.length, merged, deleted, created });
 
-      return { notes: notes.length, merged, deleted, created, summary };
+      const result = { notes: notes.length, merged, deleted, created, summary };
+    if (onComplete) try { onComplete(result); } catch {}
+    return result;
     } catch (err) {
       _log.error('dream_error', { module: 'dream', error: err.message });
       return null;

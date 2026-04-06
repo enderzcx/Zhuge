@@ -80,6 +80,7 @@ ${numbered}
     compound: config.TG_TOPIC_COMPOUND || null,
     chart: config.TG_TOPIC_CHART || null,
     news: config.TG_TOPIC_NEWS || null,
+    system: config.TG_TOPIC_OBSERVE || null, // dream/system alerts share observe topic
   };
 
   async function _send(text, topicKey) {
@@ -175,7 +176,7 @@ ${numbered}
       const text = [
         '🖥 System Status',
         '',
-        `CPU: ${snap.mem_pct}% MEM | Heap: ${snap.heap_mb}MB | RSS: ${snap.rss_mb}MB`,
+        `MEM: ${snap.mem_pct}% | Heap: ${snap.heap_mb}MB | RSS: ${snap.rss_mb}MB`,
         `MEM: ${snap.mem_free_mb}MB free / ${snap.mem_total_mb}MB total`,
         `Uptime: ${snap.uptime_h}h | CPUs: ${snap.cpus}`,
         '',

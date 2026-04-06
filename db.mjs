@@ -6,7 +6,8 @@ import { mkdirSync } from 'fs';
 import { createHash } from 'crypto';
 import Database from 'better-sqlite3';
 
-export function createDB() {
+export function createDB({ log } = {}) {
+  const _log = log || { warn: (msg, ctx) => console.error(`[DB] ${msg}`, ctx?.error || '') };
   mkdirSync('data', { recursive: true });
   const db = new Database('data/rifi.db');
   db.pragma('journal_mode = WAL');
@@ -435,7 +436,7 @@ export function createDB() {
         );
       }
     });
-    try { insert(newsArr); } catch (e) { console.error('[DB] News insert error:', e.message); }
+    try { insert(newsArr); } catch (e) { _log.warn('db_news_insert_error', { module: 'db', error: e.message }); }
   }
 
   function persistAnalysis(mode, parsed, now) {
@@ -452,13 +453,13 @@ export function createDB() {
         parsed.push_worthy ? 1 : 0,
         now
       );
-    } catch (e) { console.error('[DB] Analysis insert error:', e.message); }
+    } catch (e) { _log.warn('db_analysis_insert_error', { module: 'db', error: e.message }); }
   }
 
   function persistPatrol(mode, report, period, scans, riskRange, sentRange, trades, now) {
     try {
       insertPatrol.run(mode, report, period, scans, riskRange, sentRange, trades, now);
-    } catch (e) { console.error('[DB] Patrol insert error:', e.message); }
+    } catch (e) { _log.warn('db_patrol_insert_error', { module: 'db', error: e.message }); }
   }
 
   const insertCandidate = db.prepare(`

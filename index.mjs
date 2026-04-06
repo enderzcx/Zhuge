@@ -65,9 +65,9 @@ app.use(express.json());
 
 // --- Create modules ---
 initTracing('zhuge', process.env.OTEL_ENDPOINT);
-const db = createDB();
-const metrics = createMetrics(db.db);
 const { log, readLogs } = createLogger();
+const db = createDB({ log });
+const metrics = createMetrics(db.db);
 // alertFn wired after pushEngine creation below
 const _alertRef = { fn: null };
 const health = createHealthMonitor(metrics, { log, alertFn: (msg) => _alertRef.fn?.(msg) });
@@ -110,7 +110,7 @@ const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenan
 _compoundRef.instance = agentCompound; // wire into scanner via getter
 
 // --- Dream Worker (memory consolidation) ---
-const dream = createDream({ db: db.db, llm, log, metrics });
+const dream = createDream({ db: db.db, llm, log, metrics, onComplete: (r) => pushEngine?.postDream?.(r) });
 
 dream.start();
 
