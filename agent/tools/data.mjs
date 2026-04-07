@@ -239,6 +239,54 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       requiresConfirmation: false,
     },
     {
+      name: 'search_news',
+      description: '搜索加密新闻: 关键词搜索72+来源(Bloomberg/Reuters/CoinDesk等)，含AI评分和信号。用于验证消息、追踪事件、查特定币种新闻',
+      parameters: {
+        type: 'object',
+        properties: {
+          keyword: { type: 'string', description: '搜索关键词 (如 "SEC ETF", "Binance hack")' },
+          coin: { type: 'string', description: '按币种过滤 (如 "BTC", "ETH", "SOL")' },
+          limit: { type: 'number', description: '返回条数 (默认10, 最多20)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'get_listing_news',
+      description: '交易所上币/下币公告 (Binance/Coinbase/OKX/Bybit)。重大上币=利好，下币=利空',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: '返回条数 (默认10)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'get_onchain_signals',
+      description: '链上信号: 鲸鱼交易、KOL操作、大额持仓变动 (Hyperliquid等)。用于验证鲸鱼动向',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: '返回条数 (默认10)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'get_high_impact_news',
+      description: '高影响力新闻 (AI评分≥70)。只看最重要的新闻，过滤噪音',
+      parameters: {
+        type: 'object',
+        properties: {
+          min_score: { type: 'number', description: 'AI最低评分 (默认70, 范围0-100)' },
+          signal: { type: 'string', description: '过滤信号方向: long/short/neutral (可选)' },
+          limit: { type: 'number', description: '返回条数 (默认10)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
+    {
       name: 'get_intel_feed',
       description: '实时情报流: TG频道+API 合并的最新市场情报，含 impact 评分和来源。用于快速了解当前市场发生了什么',
       parameters: {
@@ -681,7 +729,80 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       }
     },
 
-    // --- Intel Stream tools ---
+    // --- OpenNews tools (ai.6551.io/open/news_search) ---
+    async search_news({ keyword, coin, limit = 10 } = {}) {
+      if (!keyword && !coin) return JSON.stringify({ error: 'keyword or coin required' });
+      try {
+        const body = { limit: Math.min(limit, 20) };
+        if (keyword) body.q = keyword;
+        if (coin) body.coins = [coin.toUpperCase()];
+        const data = await _twitterPost('/news_search', body);
+        if (data.error) return JSON.stringify(data);
+        const items = (data.data || []).slice(0, 20).map(n => ({
+          title: (n.text || '').slice(0, 150),
+          source: n.newsType || '?',
+          score: n.aiRating?.score || 0,
+          signal: n.aiRating?.signal || 'neutral',
+          summary: (n.aiRating?.enSummary || n.aiRating?.summary || '').slice(0, 100),
+          coins: (n.coins || []).map(c => c.symbol),
+          link: n.link || '',
+        }));
+        return JSON.stringify({ count: items.length, items });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    async get_listing_news({ limit = 10 } = {}) {
+      try {
+        const body = { limit: Math.min(limit, 20), engineTypes: { listing: [] } };
+        const data = await _twitterPost('/news_search', body);
+        if (data.error) return JSON.stringify(data);
+        const items = (data.data || []).slice(0, 20).map(n => ({
+          title: (n.text || '').slice(0, 150),
+          source: n.newsType || '?',
+          score: n.aiRating?.score || 0,
+          signal: n.aiRating?.signal || 'neutral',
+          coins: (n.coins || []).map(c => c.symbol),
+        }));
+        return JSON.stringify({ count: items.length, items });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    async get_onchain_signals({ limit = 10 } = {}) {
+      try {
+        const body = { limit: Math.min(limit, 20), engineTypes: { onchain: [] } };
+        const data = await _twitterPost('/news_search', body);
+        if (data.error) return JSON.stringify(data);
+        const items = (data.data || []).slice(0, 20).map(n => ({
+          title: (n.text || '').slice(0, 150),
+          source: n.newsType || '?',
+          score: n.aiRating?.score || 0,
+          signal: n.aiRating?.signal || 'neutral',
+          coins: (n.coins || []).map(c => c.symbol),
+        }));
+        return JSON.stringify({ count: items.length, items });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    async get_high_impact_news({ min_score = 70, signal, limit = 10 } = {}) {
+      try {
+        const body = { limit: Math.min(limit * 3, 60) }; // fetch more, filter client-side
+        const data = await _twitterPost('/news_search', body);
+        if (data.error) return JSON.stringify(data);
+        let items = (data.data || []).filter(n => (n.aiRating?.score || 0) >= min_score);
+        if (signal) items = items.filter(n => n.aiRating?.signal === signal);
+        items = items.slice(0, limit).map(n => ({
+          title: (n.text || '').slice(0, 150),
+          source: n.newsType || '?',
+          score: n.aiRating?.score || 0,
+          signal: n.aiRating?.signal || 'neutral',
+          summary: (n.aiRating?.enSummary || '').slice(0, 100),
+          coins: (n.coins || []).map(c => c.symbol),
+        }));
+        return JSON.stringify({ count: items.length, items });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    // --- Twitter/X tools (ai.6551.io/open/twitter_*) ---
     async search_twitter({ keywords, max_results = 10 } = {}) {
       if (!keywords) return JSON.stringify({ error: 'keywords required' });
       try {
