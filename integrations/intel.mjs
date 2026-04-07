@@ -11,9 +11,26 @@
 
 import { createHash } from 'crypto';
 
+// Catch GramJS TIMEOUT errors globally BEFORE any client is created
+// Must be at module level to catch errors during import/init phase
+let _gramjsHandlerInstalled = false;
+function _installGramjsErrorHandler() {
+  if (_gramjsHandlerInstalled) return;
+  _gramjsHandlerInstalled = true;
+  process.on('unhandledRejection', (err) => {
+    const msg = err?.message || String(err);
+    if (msg === 'TIMEOUT' || msg.includes('TIMEOUT') || msg.includes('Not connected') || msg.includes('CONNECTION_NOT_INITED')) {
+      console.warn('[Intel] GramJS error caught (non-fatal):', msg);
+      return; // swallow — GramJS auto-reconnects
+    }
+  });
+}
+
 export function createIntelStream({ config, db }) {
   const INTEL = config.INTEL || {};
   const _log = { info: (...a) => console.log('[Intel]', ...a), error: (...a) => console.error('[Intel]', ...a), warn: (...a) => console.warn('[Intel]', ...a) };
+
+  _installGramjsErrorHandler();
 
   // --- State ---
   let _triggerHandler = null;
@@ -238,15 +255,6 @@ export function createIntelStream({ config, db }) {
       _stats.tgConnected = false;
     }
 
-    // Catch GramJS internal errors (TIMEOUT in update loop) to prevent process crash
-    process.on('unhandledRejection', (err) => {
-      if (err?.message === 'TIMEOUT' || err?.message?.includes('TIMEOUT')) {
-        _log.warn('GramJS TIMEOUT caught (non-fatal)');
-        return; // swallow — GramJS auto-reconnects
-      }
-      // Re-throw non-GramJS errors so they're handled normally
-      throw err;
-    });
   }
 
   // XActions scraper removed — VPS IP blocked by Twitter.
