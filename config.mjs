@@ -119,18 +119,12 @@ export function createConfig() {
                  'PetroGlobeEnterprises'],
       },
     },
-    x: {
-      enabled: !!(process.env.X_AUTH_TOKEN || process.env.X_USERNAME),
-      authToken: process.env.X_AUTH_TOKEN || '',
-      ct0: process.env.X_CT0 || '',
-      twid: process.env.X_TWID || '',
-      username: process.env.X_USERNAME || '',
-      password: process.env.X_PASSWORD || '',
-      kols: ['whale_alert', 'lookonchain', 'EmberCN', 'WuBlockchain',
-             'CryptoQuant_Alert', 'tier10k', 'DeItaone', 'zaborskiy_eth'],
-      keywords: ['BTC crash', 'SEC crypto', 'ETF approved', 'hack exploit',
-                 'oil surge OPEC', 'listing Binance'],
-      pollInterval: 10 * 60 * 1000,
+    // XActions scraper disabled — VPS IP blocked by Twitter
+    // Twitter data accessed via opentwitter API tool (ai.6551.io) instead
+    x: { enabled: false },
+    opentwitter: {
+      token: process.env.TWITTER_TOKEN || '',
+      baseUrl: 'https://ai.6551.io',
     },
     apis: {
       dailyNews: { url: 'https://ai.6551.io/open/free_hot', interval: 6 * 3600 * 1000 },

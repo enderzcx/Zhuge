@@ -1,10 +1,10 @@
 /**
  * Intel Stream: unified event-driven data source layer.
  *
- * Three tiers:
- *  1. TG Channels (GramJS)  — true real-time push
- *  2. Twitter/X  (XActions)  — 10min poll KOLs + keyword search
- *  3. Free APIs              — low-freq supplement (1h/6h)
+ * Two tiers:
+ *  1. TG Channels (GramJS)  — 2min poll + event hybrid
+ *  2. Free APIs              — low-freq supplement (6h)
+ * Twitter/X via opentwitter API tool (agent-initiated, not polled)
  *
  * All items flow through: normalize → dedup → score → route (trigger / cache / DB-only)
  */
@@ -23,7 +23,7 @@ export function createIntelStream({ config, db }) {
   let _fearGreedCache = null;
   let _tgClient = null;
   const _intervals = [];
-  let _stats = { tgConnected: false, xConnected: false, itemsIngested: 0, triggered: 0 };
+  let _stats = { tgConnected: false, xRemoved: true, itemsIngested: 0, triggered: 0 };
 
   // =========================================================================
   //  IMPACT SCORING (no LLM, pure rules)
@@ -138,12 +138,9 @@ export function createIntelStream({ config, db }) {
         _log.info(`FLASH [${deduped.score}] ${deduped.title.slice(0, 80)} (${deduped.origin})`);
         try { _triggerHandler(deduped); } catch (e) { _log.error('trigger_handler_error', e.message); }
       }
-      _cache.unshift(deduped);
-    } else if (deduped.score >= 50) {
-      // PRIORITY — cache for next analyst cycle
-      _cache.unshift(deduped);
     }
-    // <50 — DB only
+    // ALL items go to cache (Analyst needs news regardless of score)
+    _cache.unshift(deduped);
 
     // Cache management
     while (_cache.length > (INTEL.cacheMaxItems || 500)) _cache.pop();
@@ -252,92 +249,8 @@ export function createIntelStream({ config, db }) {
     });
   }
 
-  // =========================================================================
-  //  TWITTER/X MONITOR (XActions — 10min poll)
-  // =========================================================================
-  // =========================================================================
-  //  TWITTER/X MONITOR (agent-twitter-client Scraper — 10min poll)
-  // =========================================================================
-  let _scraper = null;
-  let _xLoginFailed = false;
-
-  async function _getXScraper() {
-    if (_xLoginFailed) return null;
-    if (_scraper) return _scraper;
-    try {
-      const { Scraper } = await import('agent-twitter-client');
-      _scraper = new Scraper();
-      // Login via cookies (from x.com DevTools → Application → Cookies)
-      const cookies = [];
-      if (INTEL.x.authToken) cookies.push(`auth_token=${INTEL.x.authToken}; Domain=.twitter.com; Path=/`);
-      if (INTEL.x.ct0) cookies.push(`ct0=${INTEL.x.ct0}; Domain=.twitter.com; Path=/`);
-      if (INTEL.x.twid) cookies.push(`twid=${INTEL.x.twid}; Domain=.twitter.com; Path=/`);
-      await _scraper.setCookies(cookies);
-      const loggedIn = await _scraper.isLoggedIn();
-      if (!loggedIn) {
-        // Fallback: try username/password if provided
-        if (INTEL.x.username && INTEL.x.password) {
-          await _scraper.login(INTEL.x.username, INTEL.x.password);
-        } else {
-          _log.warn('X auth_token invalid and no username/password fallback');
-          _xLoginFailed = true;
-          _stats.xConnected = false;
-          return null;
-        }
-      }
-      _stats.xConnected = true;
-      _log.info('X/Twitter scraper connected');
-      return _scraper;
-    } catch (e) {
-      _xLoginFailed = true;
-      _stats.xConnected = false;
-      _log.warn('X scraper init failed:', e.message);
-      return null;
-    }
-  }
-
-  async function _pollXKols() {
-    if (!INTEL.x?.enabled) return;
-    const scraper = await _getXScraper();
-    if (!scraper) return;
-    for (const kol of (INTEL.x.kols || [])) {
-      try {
-        const iterator = scraper.getTweets(kol, 3);
-        let count = 0;
-        for await (const tweet of iterator) {
-          if (count++ >= 3) break;
-          if (!tweet?.text) continue;
-          _ingest({
-            title: tweet.text,
-            source: `x:@${kol}`,
-            link: tweet.permanentUrl || '',
-          }, 'twitter');
-        }
-      } catch { /* individual KOL fail is not critical */ }
-    }
-  }
-
-  async function _pollXKeywords() {
-    if (!INTEL.x?.enabled) return;
-    const scraper = await _getXScraper();
-    if (!scraper) return;
-    const { SearchMode } = await import('agent-twitter-client');
-    for (const kw of (INTEL.x.keywords || [])) {
-      try {
-        const iterator = scraper.searchTweets(kw, 5, SearchMode.Latest);
-        let count = 0;
-        for await (const tweet of iterator) {
-          if (count++ >= 5) break;
-          if (!tweet?.text) continue;
-          _ingest({
-            title: tweet.text,
-            source: `x:search:${kw}`,
-            link: tweet.permanentUrl || '',
-          }, 'twitter');
-        }
-      } catch { /* individual keyword fail not critical */ }
-    }
-  }
+  // XActions scraper removed — VPS IP blocked by Twitter.
+  // Twitter data accessed via opentwitter API (ai.6551.io) agent tool instead.
 
   // =========================================================================
   //  API POLLERS (low-frequency supplement)
@@ -404,17 +317,7 @@ export function createIntelStream({ config, db }) {
     // 1. TG Channels (real-time push)
     _initTelegram().catch(e => _log.error('TG start failed:', e.message));
 
-    // 2. Twitter/X (10min poll)
-    if (INTEL.x?.enabled) {
-      const xInterval = INTEL.x.pollInterval || 10 * 60 * 1000;
-      _pollXKols().catch(() => {});
-      _intervals.push(setInterval(() => {
-        _pollXKols().catch(() => {});
-        _pollXKeywords().catch(() => {});
-      }, xInterval));
-      _stats.xConnected = true;
-      _log.info(`X/Twitter polling started (${xInterval / 60000}min)`);
-    }
+    // 2. Twitter/X — handled via opentwitter API tool (agent-initiated, not polled)
 
     // 3. Free APIs (low-freq)
     // Daily news — run once now, then every 6h
