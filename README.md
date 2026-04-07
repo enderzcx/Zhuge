@@ -1,154 +1,169 @@
-# 诸葛 (Zhuge) — TradeAgent
+# 诸葛 (Zhuge) — Autonomous AI Trading System
 
-Autonomous AI trading system — 7 agents, real money, self-learning. Named after Zhuge Liang: observe, plan, act.
+7 AI agents, real money, self-evolving knowledge. Named after Zhuge Liang: observe, plan, act.
 
 ## What It Does
 
-A multi-agent system that trades crypto futures 24/7 on Bitget CEX. 诸葛 (TG Agent) is the commander; 5 sub-agents (analyst, risk, researcher, strategist, reviewer) run autonomously. A three-layer knowledge architecture lets the system learn from expert knowledge, its own experience, and real-time data — forming a closed-loop that validates and evolves knowledge over time.
+A multi-agent system that trades crypto futures 24/7 on Bitget. The TG Agent (诸葛) is the commander; 6 sub-agents (analyst, risk, researcher, strategist, reviewer, dream worker) run autonomously. A three-layer knowledge architecture lets the system learn from expert knowledge, its own experience, and real-time data — forming a closed-loop that validates and evolves knowledge over time.
+
+~15,000 lines of code. 80+ files. 63 tests. 21 SQLite tables. One VPS.
 
 ## Architecture
 
 ```
-诸葛 TG Agent (commander, natural language interface, self-discovery)
+Pipeline (AI-driven scheduling: analyst decides next_check_in)
+  ├── Data Collection
+  │     Crucix 27-source OSINT + OpenNews + OKX WebSocket
   │
-  ├── Pipeline (AI-driven scheduling: analyst decides next_check_in)
-  │     ├── Data Collection (Crucix 27-source OSINT + OpenNews + OKX WebSocket)
-  │     ├── Analyst Agent (7 tools, AI chooses which to call)
-  │     │     ├── get_crucix_data, get_crypto_news, get_prices (baseline)
-  │     │     ├── get_technical_indicators (conditional: only for serious candidates)
-  │     │     ├── search_knowledge (RAG: cross-reference patterns with 48+ entries)
-  │     │     └── get_system_metrics (self-calibrate: accuracy, veto rate)
-  │     ├── Risk Agent (fail-closed: 24h loss >5%, 3 consecutive losses → VETO)
-  │     ├── Executor (Kelly sizing, 4-level graduated scaling, TP/SL)
-  │     └── Strategist Agent (strategy evaluation)
+  ├── Analyst Agent (9 tools, AI chooses which to call)
+  │     submit_analysis → structured output (no free-form JSON parsing)
   │
-  ├── Scanner (AI-driven scheduling)
-  │     ├── 540+ futures market scan
-  │     ├── Researcher Agent (volume/price action/funding/narrative scoring)
-  │     └── Momentum trading (auto open/close)
+  ├── Risk Agent (fail-closed)
+  │     Hard rules: 24h loss >5% equity, consecutive losses → VETO
+  │     Soft rules: LLM evaluation via submit_verdict tool
+  │     Equity from WebSocket cache (zero-latency, no API call)
   │
-  ├── Three-Layer Knowledge Architecture
-  │     ├── Layer 1: Expert Knowledge (RAG)
-  │     │     48 entries: Wyckoff/SMC/ICT/Kelly/0.31 Fib/OI divergence...
-  │     │     Local Ollama embedding + LanceDB vector search, 110ms, zero API cost
-  │     ├── Layer 2: Self-Discovered Knowledge (Compound)
-  │     │     LLM reviews trade history + veto patterns + signal accuracy
-  │     │     → auto-generates rules with confidence + evidence
-  │     │     → validates/updates/deprecates on each review cycle
-  │     └── Layer 3: Real-Time Intelligence
-  │           Crucix 27-source OSINT + OKX prices + TG alerts + AI news
-  │     Feedback loop: Layer 1 → influences trades → results feed Layer 2
-  │     → Layer 2 validates Layer 1 knowledge effectiveness → evolves
+  ├── Executor
+  │     Kelly criterion sizing (half-Kelly, capped 25%)
+  │     4-level graduated scaling (1:1:2:4 pyramid)
+  │     Bitget Private WebSocket: real-time fills + position close
   │
-  ├── Compound System Review (every 10 trades or 10+ vetoes)
-  │     ├── Trade patterns (win/loss analysis)
-  │     ├── Decision flow (veto rationality, threshold tuning)
-  │     ├── Signal calibration (accuracy trends, directional bias)
-  │     ├── Momentum efficiency (scanner conversion rate)
-  │     └── System-level optimization suggestions
-  │
-  ├── Reviewer Agent (every 3h)
-  │     ├── Signal accuracy scoring
-  │     └── Lesson extraction
-  │
-  └── Observability
-        ├── 19 metric types (SQLite time-series)
-        ├── Structured JSON logging (31+ event types, zero bare console.log)
-        ├── OpenTelemetry → Jaeger (3-layer span model)
-        ├── Health alerts → TG (RSS/mem/event loop thresholds)
-        └── Self-discovery tools (explore_codebase, query_metrics, read_logs)
+  └── Strategist Agent (AI-generated strategy evaluation)
+
+Scanner (540+ futures pairs)
+  ├── Researcher Agent (momentum scoring: volume/price/funding/narrative)
+  └── Auto open/close with TP/SL
+
+Three-Layer Knowledge Architecture
+  ├── Layer 1: Expert Knowledge (RAG)
+  │     48+ entries: Wyckoff, SMC, ICT, Kelly, Fib 0.31, OI divergence...
+  │     Local Ollama embedding + LanceDB vector search
+  ├── Layer 2: Self-Discovered Knowledge (Compound)
+  │     LLM reviews trades + vetoes + accuracy → generates rules
+  │     Rules control execution params (leverage, TP/SL, margin)
+  │     New strategies: proposed → backtest → active lifecycle
+  └── Layer 3: Real-Time Intelligence
+        Crucix OSINT + OKX prices + TG alerts + AI news
+
+Memory System
+  ├── Operational: context.md (what am I doing, what's next)
+  ├── Long-term: notes/ with frontmatter metadata, keyword recall
+  └── Dream Worker: every 6h, merge/prune/distill memories
+
+Backtest Engine
+  ├── Deterministic condition evaluator (conditions.mjs)
+  ├── Pessimistic TP/SL order (check adverse direction first)
+  ├── Same-candle re-entry guard (anti look-ahead bias)
+  └── New strategies auto-backtest 14 days before activation
+
+Observability
+  ├── 19 metric types (SQLite time-series)
+  ├── Structured JSON logging (31+ event types)
+  ├── OpenTelemetry → Jaeger (3-layer span model)
+  ├── Health alerts → Telegram
+  └── TG Supergroup Dashboard (positions, PnL, news, system health)
+```
+
+## Event-Driven Execution
+
+Trade lifecycle is event-driven via Bitget Private WebSocket, not polling:
+
+```
+Order placed → WS orders channel → fillPrice on fill → DB updated instantly
+Position closed (TP/SL/liquidation) → WS positions channel → PnL calculated → reviewer triggered
+Account balance change → WS account channel → equity cached → risk agent reads from cache
+
+REST API sync runs every 30min as fallback (5min when WS is unhealthy).
 ```
 
 ## Tech Stack
 
 - **Runtime:** Node.js (ESM), single VPS, PM2
-- **Database:** SQLite (better-sqlite3), 19 tables, WAL mode
-- **Knowledge:** LanceDB (embedded vector DB) + Ollama (local embedding, nomic-embed-text)
-- **LLM:** OpenAI-compatible API (gpt-5.4-mini default, per-agent model selection)
-- **Exchange:** Bitget CEX (futures + spot)
-- **Data:** Crucix OSINT (27 sources), OpenNews, OKX WebSocket, Telegram channels
+- **Database:** SQLite (better-sqlite3), 21 tables, WAL mode
+- **Knowledge:** LanceDB + Ollama (local embedding, nomic-embed-text)
+- **LLM:** OpenAI-compatible API (per-agent model selection)
+- **Exchange:** Bitget CEX (USDT-FUTURES), Private WebSocket for real-time events
+- **Data:** Crucix OSINT (27 sources), OpenNews, OKX WebSocket
 - **Tracing:** OpenTelemetry → Jaeger (OTLP HTTP)
-- **Interface:** Telegram Bot (streaming, inline confirmation, supergroup dashboard)
-- **Tests:** Vitest (60 cases: indicators, Kelly, scaling, signals)
+- **Interface:** Telegram Bot (streaming, confirmation, supergroup dashboard)
+- **Tests:** Vitest (63 cases: indicators, Kelly, scaling, signals, memory)
 
 ## Structure
 
 ```
-├── index.mjs              — entry point, module wiring, AI-driven scheduling, graceful shutdown
-├── pipeline.mjs           — main loop: collect → analyze → trade (AI decides interval)
-├── config.mjs             — env config (dotenv)
-├── db.mjs                 — SQLite schema (19 tables, single source of truth)
+├── index.mjs              — entry point, module wiring, AI-driven scheduling
+├── pipeline.mjs           — main loop: collect → analyze → trade
+├── config.mjs             — env config
+├── db.mjs                 — SQLite schema (21 tables)
 │
-├── agent/                 — 诸葛 TG Agent harness
+├── agent/                 — TG Agent harness
 │   ├── llm.mjs            — LLM streaming + fallback
-│   ├── loop.mjs           — async generator agent loop (8 round max)
-│   ├── history.mjs        — conversation history + 3-layer compression
-│   ├── model-select.mjs   — per-conversation model selection + latch
+│   ├── loop.mjs           — async generator agent loop
+│   ├── cognition/         — compound review + dream worker + conditions evaluator
+│   ├── knowledge/         — Trading RAG (LanceDB + Ollama)
+│   ├── memory/            — indexed recall with frontmatter metadata
 │   ├── tools/             — 20+ tools (data, system, trade, memory, RAG)
-│   ├── telegram/          — TG bot + streaming + confirmation keyboards
-│   ├── prompts/           — system prompt assembly (static + dynamic injection)
-│   ├── cognition/         — compound knowledge + decision provenance
-│   ├── knowledge/         — Trading RAG (LanceDB + Ollama embedding)
-│   ├── push/              — smart push (FLASH/TRADE/ERROR) + TG dashboard
-│   ├── observe/           — metrics, logger, health monitor, OTel tracing
-│   └── memory/            — agent memory files (context, directives)
+│   ├── telegram/          — TG bot + streaming + confirmation
+│   ├── push/              — smart push engine + TG dashboard
+│   └── observe/           — metrics, logger, health, OTel tracing
 │
-├── agents/                — 5 autonomous sub-agents
-│   ├── analyst.mjs        — 7-tool market analysis (AI chooses tools per cycle)
-│   ├── risk.mjs           — fail-closed risk gate (hard rules + LLM soft check)
-│   ├── researcher.mjs     — new coin momentum scoring (4 dimensions)
-│   ├── strategist.mjs     — active strategy evaluation
-│   └── reviewer.mjs       — post-trade lesson extraction + signal accuracy
+├── agents/                — 6 autonomous sub-agents
+│   ├── analyst.mjs        — 9-tool market analysis + submit_analysis
+│   ├── risk.mjs           — fail-closed risk gate + submit_verdict
+│   ├── researcher.mjs     — coin momentum scoring
+│   ├── strategist.mjs     — strategy evaluation
+│   ├── reviewer.mjs       — lesson extraction + signal accuracy
+│   └── runner.mjs         — generic agent loop with tool calling
 │
 ├── bitget/                — CEX integration
-│   ├── client.mjs         — authenticated API + latency metrics + OTel spans
-│   ├── executor.mjs       — Kelly sizing, 4-level scaling, trade sync
-│   └── routes.mjs         — HTTP API for manual orders
+│   ├── client.mjs         — REST API + signing + rate-limit backoff
+│   ├── ws.mjs             — Private WebSocket (orders/positions/account)
+│   ├── executor.mjs       — Kelly sizing, 4-level scaling, WS event handlers
+│   └── routes.mjs         — HTTP API
 │
 ├── market/                — market data
-│   ├── prices.mjs         — OKX WebSocket + anomaly detection (event-driven interrupt)
-│   ├── scanner.mjs        — 540+ futures scanner + momentum pipeline
-│   ├── indicators.mjs     — RSI, EMA, MACD, ATR, Bollinger, Fib (pure math, tested)
-│   └── signals.mjs        — historical signal accuracy tracking
+│   ├── prices.mjs         — OKX WebSocket + anomaly detection
+│   ├── scanner.mjs        — 540+ futures scanner
+│   ├── indicators.mjs     — RSI, EMA, MACD, ATR, Bollinger, Fib (pure math)
+│   └── signals.mjs        — signal accuracy tracking
 │
-├── data/
-│   ├── rifi.db            — SQLite database (19 tables)
-│   ├── knowledge/         — LanceDB vector store (48+ entries)
-│   ├── logs/              — structured JSON logs (7-day rolling)
-│   └── seed-knowledge.json — seed data for RAG
+├── backtest/              — deterministic backtest engine
+│   ├── engine.mjs         — candle replay + condition evaluation
+│   ├── simulator.mjs      — position management + PnL
+│   ├── loader.mjs         — Bitget historical candle loading
+│   └── report.mjs         — backtest result formatting
 │
-└── tests/                 — unit tests (vitest, 60 cases)
-    ├── indicators.test.mjs
-    ├── scaling.test.mjs
-    └── signals.test.mjs
+└── tests/                 — 63 unit tests (vitest)
 ```
 
 ## Key Design Decisions
 
-- **AI-driven scheduling:** Analyst decides `next_check_in` (10min-4h) based on market conditions, not fixed cron
-- **Three-layer knowledge:** RAG (expert) + Compound (self-discovered) + Live (real-time), with feedback loop
-- **Prompts as control plane:** Agent behavior defined in .md files, not hardcoded if/else
-- **Fail-closed safety:** All dangerous operations require TG confirmation. Unknown tools blocked by default
-- **Compound system review:** Reviews entire decision pipeline (trades + vetoes + accuracy + efficiency), not just trade outcomes
-- **Self-discovery:** 诸葛 uses explore_codebase to understand its own architecture, not hardcoded descriptions
-- **Kelly criterion sizing:** Half-Kelly capped at 25%, dynamic leverage from config/compound, math verified with tests
-- **Graduated scaling:** 4-level position pyramid (1:1:2:4 ratio), stop-loss tightens per level
-- **Zero external dependencies for observability:** SQLite metrics + JSON logs + LanceDB vectors, all on one VPS
+- **Event-driven, not polling:** Bitget Private WebSocket for fills/positions/equity. REST as fallback only.
+- **Structured LLM output:** Agents return results via function calls (submit_analysis, submit_verdict), not free-form JSON text.
+- **AI-driven scheduling:** Analyst decides `next_check_in` (10min-4h) based on volatility.
+- **Three-layer knowledge:** RAG (expert) + Compound (self-discovered) + Live (real-time), with feedback loop.
+- **Fail-closed safety:** Risk agent VETOs when equity unknown. All trades require risk approval.
+- **Kelly criterion sizing:** Half-Kelly capped at 25%, with 4-level graduated scaling.
+- **Deterministic backtest:** No LLM in backtest loop — pure condition evaluation. Pessimistic TP/SL order prevents optimistic bias.
+- **Strategy lifecycle:** proposed → backtest → active → retired. No LLM-generated strategy trades without surviving one compound review.
+- **Memory hygiene:** Dream Worker (6h) merges/prunes/distills. Max 3 delete + 3 merge + 2 create per run to prevent hallucination-driven memory wipe.
 
-## Roadmap
+## Setup
 
-### Completed
-- [x] Phase 1: AI-driven analysis scheduling (analyst outputs next_check_in)
-- [x] Phase 2: Analyst chooses tools (7 tools, AI decides which to call per cycle)
-- [x] Trading-Specific RAG (48 entries, local Ollama + LanceDB)
-- [x] Compound reviews entire system (trades + vetoes + accuracy + momentum funnel)
-- [x] Full observability (19 metrics, structured logging, OTel → Jaeger, health alerts)
-- [x] Fund safety overhaul (dynamic leverage, Kelly, graceful shutdown, risk includes floating PnL)
-- [x] 60 unit tests (indicators, Kelly, scaling, signals)
+```bash
+cp .env.example .env
+# Fill in: Bitget API keys, LLM endpoint, Telegram bot token
+npm install
+node index.mjs
+```
 
-### Next
-- [ ] Phase 3: AI generates trading strategies (not just avoid/prefer rules, but full strategy logic)
-- [ ] Compound confidence → RAG feedback (validate expert knowledge against live results)
-- [ ] Multi-timeframe analysis (analyst chooses timeframe, not hardcoded 1H/4H)
-- [ ] Agent-to-agent communication (analyst can ask researcher for specific coin analysis)
-- [ ] Backtest framework (replay historical data through current rules + knowledge)
+Requires:
+- Node.js 20+
+- Ollama running locally with `nomic-embed-text` model (for RAG)
+- Bitget API key with futures trading permission
+- OpenAI-compatible LLM endpoint
+- (Optional) Telegram bot for dashboard + commands
+
+## License
+
+Private project. Source published for reference and portfolio purposes.
