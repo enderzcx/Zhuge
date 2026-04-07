@@ -204,72 +204,85 @@ export function createIntelStream({ config, db }) {
   // =========================================================================
   //  TWITTER/X MONITOR (XActions — 10min poll)
   // =========================================================================
-  let _xModule = null;
-  let _xLoadFailed = false;
+  // =========================================================================
+  //  TWITTER/X MONITOR (agent-twitter-client Scraper — 10min poll)
+  // =========================================================================
+  let _scraper = null;
+  let _xLoginFailed = false;
 
-  async function _getXActions() {
-    if (_xLoadFailed) return null;
-    if (_xModule) return _xModule;
+  async function _getXScraper() {
+    if (_xLoginFailed) return null;
+    if (_scraper) return _scraper;
     try {
-      const mod = await import('xactions');
-      _xModule = mod.default || mod;
-      return _xModule;
+      const { Scraper } = await import('agent-twitter-client');
+      _scraper = new Scraper();
+      // Login via cookies (auth_token from x.com DevTools)
+      const cookies = [`auth_token=${INTEL.x.authToken}`];
+      await _scraper.setCookies(cookies);
+      const loggedIn = await _scraper.isLoggedIn();
+      if (!loggedIn) {
+        // Fallback: try username/password if provided
+        if (INTEL.x.username && INTEL.x.password) {
+          await _scraper.login(INTEL.x.username, INTEL.x.password);
+        } else {
+          _log.warn('X auth_token invalid and no username/password fallback');
+          _xLoginFailed = true;
+          _stats.xConnected = false;
+          return null;
+        }
+      }
+      _stats.xConnected = true;
+      _log.info('X/Twitter scraper connected');
+      return _scraper;
     } catch (e) {
-      _xLoadFailed = true;
-      _log.warn('XActions import failed (Twitter/X disabled):', e.message);
+      _xLoginFailed = true;
       _stats.xConnected = false;
+      _log.warn('X scraper init failed:', e.message);
       return null;
     }
   }
 
   async function _pollXKols() {
     if (!INTEL.x?.enabled) return;
-    const XActions = await _getXActions();
-    if (!XActions) return;
-    try {
-      const x = typeof XActions === 'function' ? new XActions({ authToken: INTEL.x.authToken }) : XActions;
-      const getTweets = x.getTweets || x.get_tweets;
-      if (!getTweets) { _log.warn('XActions: no getTweets method'); _xLoadFailed = true; return; }
-      for (const kol of (INTEL.x.kols || [])) {
-        try {
-          const tweets = await getTweets.call(x, kol, 3);
-          if (Array.isArray(tweets)) {
-            for (const t of tweets) {
-              _ingest({
-                title: t.text || t.content || '',
-                source: `x:@${kol}`,
-                link: t.url || '',
-              }, 'twitter');
-            }
-          }
-        } catch { /* individual KOL fail is not critical */ }
-      }
-    } catch (e) { _log.warn('X KOL poll failed:', e.message); }
+    const scraper = await _getXScraper();
+    if (!scraper) return;
+    for (const kol of (INTEL.x.kols || [])) {
+      try {
+        const iterator = scraper.getTweets(kol, 3);
+        let count = 0;
+        for await (const tweet of iterator) {
+          if (count++ >= 3) break;
+          if (!tweet?.text) continue;
+          _ingest({
+            title: tweet.text,
+            source: `x:@${kol}`,
+            link: tweet.permanentUrl || '',
+          }, 'twitter');
+        }
+      } catch { /* individual KOL fail is not critical */ }
+    }
   }
 
   async function _pollXKeywords() {
     if (!INTEL.x?.enabled) return;
-    const XActions = await _getXActions();
-    if (!XActions) return;
-    try {
-      const x = typeof XActions === 'function' ? new XActions({ authToken: INTEL.x.authToken }) : XActions;
-      const search = x.searchTweets || x.search_tweets;
-      if (!search) return;
-      for (const kw of (INTEL.x.keywords || [])) {
-        try {
-          const results = await search.call(x, kw, 5);
-          if (Array.isArray(results)) {
-            for (const t of results) {
-              _ingest({
-                title: t.text || t.content || '',
-                source: `x:search`,
-                link: t.url || '',
-              }, 'twitter');
-            }
-          }
-        } catch { /* individual keyword fail not critical */ }
-      }
-    } catch (e) { _log.warn('X keyword poll failed:', e.message); }
+    const scraper = await _getXScraper();
+    if (!scraper) return;
+    const { SearchMode } = await import('agent-twitter-client');
+    for (const kw of (INTEL.x.keywords || [])) {
+      try {
+        const iterator = scraper.searchTweets(kw, 5, SearchMode.Latest);
+        let count = 0;
+        for await (const tweet of iterator) {
+          if (count++ >= 5) break;
+          if (!tweet?.text) continue;
+          _ingest({
+            title: tweet.text,
+            source: `x:search:${kw}`,
+            link: tweet.permanentUrl || '',
+          }, 'twitter');
+        }
+      } catch { /* individual keyword fail not critical */ }
+    }
   }
 
   // =========================================================================

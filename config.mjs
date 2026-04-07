@@ -119,8 +119,10 @@ export function createConfig() {
       },
     },
     x: {
-      enabled: !!process.env.X_AUTH_TOKEN,
+      enabled: !!(process.env.X_AUTH_TOKEN || process.env.X_USERNAME),
       authToken: process.env.X_AUTH_TOKEN || '',
+      username: process.env.X_USERNAME || '',
+      password: process.env.X_PASSWORD || '',
       kols: ['whale_alert', 'lookonchain', 'EmberCN', 'WuBlockchain',
              'CryptoQuant_Alert', 'tier10k', 'DeItaone', 'zaborskiy_eth'],
       keywords: ['BTC crash', 'SEC crypto', 'ETF approved', 'hack exploit',
