@@ -153,8 +153,10 @@ export function createIntelStream({ config, db }) {
   }
 
   // =========================================================================
-  //  TG CHANNEL MONITOR (GramJS — true real-time push)
+  //  TG CHANNEL MONITOR (GramJS — poll + event hybrid)
   // =========================================================================
+  const _tgSeenIds = new Set(); // track message IDs to avoid duplicates
+
   async function _initTelegram() {
     if (!INTEL.tg?.apiId || !INTEL.tg?.apiHash || !INTEL.tg?.session) {
       _log.warn('TG credentials missing, skipping TG channel monitor');
@@ -174,27 +176,62 @@ export function createIntelStream({ config, db }) {
       await _tgClient.connect();
       _stats.tgConnected = true;
 
-      // Collect all channel usernames
       const allChannels = [
         ...(INTEL.tg.channels?.crypto || []),
         ...(INTEL.tg.channels?.energy || []),
       ];
 
+      // Initialize update state
+      await _tgClient.getDialogs({ limit: 5 }).catch(() => {});
+
       _log.info(`TG connected, monitoring ${allChannels.length} channels`);
 
-      // Register event handler for new messages from monitored channels
+      // Event handler for real-time push (best effort)
       _tgClient.addEventHandler((event) => {
         try {
           const msg = event.message;
           if (!msg?.message) return;
-          const chat = msg.peerId;
-          const channelName = msg?.chat?.username || chat?.channelId?.toString() || 'unknown';
-          _ingest({
-            title: msg.message,
-            source: `tg:${channelName}`,
-          }, `tg:${channelName}`);
-        } catch (e) { _log.error('tg_message_handler_error', e.message); }
+          const msgId = msg.id?.toString();
+          if (msgId && _tgSeenIds.has(msgId)) return;
+          if (msgId) _tgSeenIds.add(msgId);
+          const channelName = msg?.chat?.username || msg?.peerId?.channelId?.toString() || 'unknown';
+          _log.info(`TG event: ${channelName}`);
+          _ingest({ title: msg.message, source: `tg:${channelName}` }, `tg:${channelName}`);
+        } catch (e) { _log.error('tg_event_error', e.message); }
       }, new NewMessage({ chats: allChannels }));
+
+      // Active polling: fetch recent messages every 2 min (reliable fallback)
+      async function _pollTgChannels() {
+        if (!_tgClient?.connected) return;
+        for (const ch of allChannels) {
+          try {
+            const msgs = await _tgClient.getMessages(ch, { limit: 5 });
+            for (const m of msgs) {
+              if (!m.message) continue;
+              // Only process messages from last 10 min
+              const age = Date.now() / 1000 - m.date;
+              if (age > 600) continue;
+              const msgId = m.id?.toString();
+              if (msgId && _tgSeenIds.has(msgId)) continue;
+              if (msgId) _tgSeenIds.add(msgId);
+              const channelName = m.chat?.username || ch;
+              _ingest({ title: m.message, source: `tg:${channelName}` }, `tg:${channelName}`);
+            }
+          } catch { /* single channel fail not critical */ }
+        }
+        // Cap seen IDs set
+        if (_tgSeenIds.size > 10000) {
+          const arr = [..._tgSeenIds];
+          arr.splice(0, arr.length - 5000);
+          _tgSeenIds.clear();
+          arr.forEach(id => _tgSeenIds.add(id));
+        }
+      }
+
+      // Run first poll immediately, then every 2 min
+      _pollTgChannels().catch(() => {});
+      _intervals.push(setInterval(() => _pollTgChannels().catch(() => {}), 2 * 60 * 1000));
+
     } catch (e) {
       _log.error('TG init failed:', e.message);
       _stats.tgConnected = false;
