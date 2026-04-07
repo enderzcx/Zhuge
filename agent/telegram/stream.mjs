@@ -203,7 +203,9 @@ export function createTGStream(chatId, tgCall) {
     if (timer) { clearTimeout(timer); timer = null; }
     stopTyping();
 
-    if (finalText !== undefined) buffer = finalText;
+    // Only replace buffer if finalText adds content. Never shrink — prevents
+    // losing streamed text when LLM's final round is shorter than earlier rounds.
+    if (finalText !== undefined && finalText.length > buffer.length) buffer = finalText;
     toolStatuses = toolStatuses.filter(t => t.status !== 'done'); // keep only errors
 
     if (messageId) {
