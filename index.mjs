@@ -43,6 +43,8 @@ import { createDataTools } from './agent/tools/data.mjs';
 import { createRAG } from './agent/knowledge/rag.mjs';
 import { createTradeTools } from './agent/tools/trade.mjs';
 import { createMemoryTools } from './agent/tools/memory.mjs';
+import { createScheduleTools } from './agent/tools/schedule.mjs';
+import { createTaskScheduler } from './agent/scheduler.mjs';
 import { createPromptLoader } from './agent/prompts/loader.mjs';
 import { createConfirmHandler } from './agent/telegram/confirm.mjs';
 import { createAgentBot } from './agent/telegram/bot.mjs';
@@ -121,6 +123,7 @@ const _dashboardRef = { instance: null };
 const dream = createDream({ db: db.db, llm, log, metrics, onComplete: (r) => _dashboardRef.instance?.postDream?.(r) });
 
 dream.start();
+taskScheduler.start();
 
 // --- RAG Knowledge Base ---
 const rag = createRAG({ config, log });
@@ -140,10 +143,13 @@ const dataTools = createDataTools({
 });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log, db });
-toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS]);
+// Scheduler created after scanner/pipeline (uses getter pattern for late-binding)
+const _schedulerRef = { instance: null };
+const scheduleTools = createScheduleTools({ db, log, scheduler: { refresh: () => _schedulerRef.instance?.refresh() } });
+toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS, ...scheduleTools.TOOL_DEFS]);
 
 const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
-toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS });
+toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS, ...scheduleTools.EXECUTORS });
 
 const promptLoader = createPromptLoader({
   db: db.db,
@@ -167,6 +173,10 @@ _alertRef.fn = (msg) => pushEngine.pushError({ source: 'health', message: msg })
 
 // Create pipeline (after push engine)
 const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine, prom });
+
+// Task Scheduler (agent-managed recurring jobs)
+const taskScheduler = createTaskScheduler({ db, pipeline, scanner, compound: agentCompound, log, metrics, pushEngine });
+_schedulerRef.instance = taskScheduler;
 
 // --- Register routes ---
 registerAnalysisRoutes(app, { cache, agentMetrics: agentRunner.agentMetrics, priceStream, config, pipeline, db, signals });
@@ -294,6 +304,7 @@ app.listen(config.PORT, () => {
       // Stop accepting new work
       if (agentBot?.stop) agentBot.stop();
       intelStream.stop();
+      taskScheduler.stop();
       health.stop();
       dream.stop();
       // Sync trades one last time (detect fills before exit)

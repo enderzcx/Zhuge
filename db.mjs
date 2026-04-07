@@ -347,6 +347,39 @@ export function createDB({ log } = {}) {
     CREATE INDEX IF NOT EXISTS idx_intel_score ON intel_items(score);
     CREATE INDEX IF NOT EXISTS idx_intel_created ON intel_items(created_at);
 
+    -- Scheduled tasks: agent-managed recurring jobs
+    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      enabled INTEGER DEFAULT 1,
+      schedule_type TEXT NOT NULL,
+      interval_ms INTEGER,
+      daily_hour INTEGER,
+      daily_minute INTEGER DEFAULT 0,
+      action TEXT NOT NULL,
+      metadata TEXT DEFAULT '{}',
+      last_run_at TEXT,
+      next_run_at TEXT,
+      run_count INTEGER DEFAULT 0,
+      error_count INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sched_next ON scheduled_tasks(enabled, next_run_at);
+
+    CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      status TEXT DEFAULT 'success',
+      duration_ms INTEGER,
+      result_summary TEXT,
+      error_message TEXT,
+      run_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sched_runs ON scheduled_task_runs(task_id, run_at);
+
     -- Memory backup: critical memory files backed up to SQLite
     CREATE TABLE IF NOT EXISTS memory_backup (
       key TEXT PRIMARY KEY,
