@@ -7,7 +7,7 @@
 *观其大略，运筹帷幄，决胜千里*
 
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![SQLite](https://img.shields.io/badge/SQLite-21_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-22_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Bitget](https://img.shields.io/badge/Bitget-USDT_Futures-00D084)](https://www.bitget.com/)
 [![Tests](https://img.shields.io/badge/tests-63_passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
@@ -38,7 +38,7 @@
 | 学习 | 不会 | 三层知识架构：专家 RAG + 自主发现规则 + 实时情报 |
 | 执行 | REST 轮询 | WebSocket 事件驱动（成交 <1s 入库） |
 | 策略 | 写死的 | AI 生成 → 自动回测 → 生命周期管理 |
-| 记忆 | 无状态 | Dream Worker 每 6h 自主整理记忆 |
+| 记忆 | 无状态 | Dream Worker 自主整理（每 2h 检查，≤6h 运行一次） |
 | 回测 | LLM 参与（慢、不可复现） | 确定性条件评估器（快、可复现） |
 
 ## 架构
@@ -72,7 +72,7 @@
 │   扫描器 ─── 540+ 合约 ─── 研究员 Agent ─── 动量交易          │
 │                                                              │
 │   复盘系统 ── 复盘交易 ── 生成规则 ── 进化                     │
-│   Dream Worker ── 每 6h 合并/清理/提炼记忆                     │
+│   Dream Worker ── 每 2h 检查，最短 6h 运行一次，需要 3+ 条 note                     │
 │   审计员 Agent ── 信号准确度 ── 经验提取                       │
 │   策略师 Agent ── 评估 AI 生成的策略                           │
 └─────────────────────────────────────────────────────────────┘
@@ -84,7 +84,7 @@
 
 ```
 第一层：专家知识（RAG）
-│  48+ 条目：Wyckoff、SMC、ICT、Kelly、Fib 0.31、OI 背离...
+│  30+ 条目：Wyckoff、SMC、ICT、Kelly、Fib 0.31、OI 背离...
 │  本地 Ollama 向量化 + LanceDB 向量检索
 │  零 API 成本，110ms 检索
 │
@@ -104,15 +104,15 @@
 
 ## 事件驱动执行
 
-不轮询。没有 `setTimeout` hack。通过 Bitget 私有 WebSocket 实时推送：
+交易执行的主路径是事件驱动，通过 Bitget 私有 WebSocket 实时推送：
 
 ```
-订单成交   → WS orders 频道   → 成交价即时入库 → DB 更新
-仓位平仓   → WS positions 频道 → PnL 计算 → 触发审计员
+订单成交   → WS orders 频道   → 成交价 + PnL 即时入库 → 触发审计员
+仓位消失   → WS positions 频道 → 兜底平仓检测（标记 'closing'）
 余额变动   → WS account 频道   → 权益缓存 → 风控 Agent 直接读缓存
 
-REST 同步每 30min 作为兜底（WS 不健康时降为 5min）。
-自适应：系统知道什么时候信任 WS，什么时候回退到 REST。
+REST 同步自适应：WS 健康时 30min，不健康时 5min。
+分析主循环和 WS 重连仍使用定时器 —— "事件驱动"指交易执行路径，不是整个系统。
 ```
 
 ## 风控体系
@@ -124,15 +124,14 @@ REST 同步每 30min 作为兜底（WS 不健康时降为 5min）。
 - **连续亏损冷却：** 3+ 笔亏损（金字塔模式下 5 笔）→ 强制冷却 1 小时
 - **Kelly 公式仓位管理：** 半 Kelly，上限 25% 可用保证金
 - **4级金字塔建仓：** 先小仓试探，只在信心递增 + 价格确认后加仓
-- **策略门槛：** AI 生成的策略不能直接交易，必须存活一轮复盘周期
-- **回测门槛：** 新策略自动回测 14 天，胜率 <20% 直接 retired
+- **策略门槛：** 新策略创建时自动回测 14 天，胜率 <20% 直接 retired
 
 ## 技术栈
 
 | 组件 | 选型 | 理由 |
 |------|------|------|
 | 运行时 | Node.js (ESM) | 单线程事件循环天然适合交易流水线 |
-| 数据库 | SQLite (WAL 模式) | 21 张表，零运维，单文件备份 |
+| 数据库 | SQLite (WAL 模式) | 22 张表，零运维，单文件备份 |
 | 向量库 | LanceDB + Ollama | 本地向量化，零 API 成本，110ms 检索 |
 | LLM | OpenAI 兼容 API | 每个 Agent 独立选模型，自动降级链 |
 | 交易所 | Bitget（私有 WebSocket） | 事件驱动成交推送，540+ 合约对 |
@@ -165,7 +164,7 @@ node index.mjs
 ```
 ├── index.mjs              — 入口，模块装配
 ├── pipeline.mjs           — 采集 → 分析 → 交易 主循环
-├── config.mjs / db.mjs    — 配置 + 21 张表 SQLite schema
+├── config.mjs / db.mjs    — 配置 + 22 张表 SQLite schema
 │
 ├── agent/                 — 诸葛 TG Agent 框架
 │   ├── cognition/         — 复盘系统、Dream Worker、条件评估器
@@ -207,7 +206,7 @@ node index.mjs
 - **回测不用 LLM。** LLM 输出不确定 → 回测结果不可复现。诸葛用纯 `conditions.mjs` 评估器，快且一致。
 - **结构化输出用函数调用。** 不让 LLM 输出 JSON 文本（约 5% 概率解析失败），而是让 Agent 调用 `submit_analysis()` / `submit_verdict()` 工具，schema 由函数定义强制约束。
 - **Dream Worker 有限额。** 每轮最多删 3 条 + 合并 3 条 + 新建 2 条。没有这个限制，LLM 幻觉可能一轮清空全部记忆。
-- **策略生命周期。** `proposed → 回测 → active → retired`。AI 生成的策略不能直接用真钱交易，必须过回测 + 存活一轮复盘。防止 LLM 幻觉直接下单。
+- **策略生命周期。** `proposed → active → retired`。高置信策略即时激活；其余等下一轮复盘提升。所有新策略创建时自动回测 14 天，胜率 <20% 直接 retired。
 - **WebSocket 优先，REST 兜底。** 事件驱动消除了轮询间隔内仓位平仓无法检测的盲区。REST 自适应：WS 健康时 30min，不健康时 5min。
 - **悲观回测。** 做多时先检查最低价（止损），再检查最高价（止盈）。防止系统性的乐观偏差。
 

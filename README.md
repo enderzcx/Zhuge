@@ -38,7 +38,7 @@ Most "AI trading bots" are either:
 | Learning | None | Three-layer knowledge: expert RAG + self-discovered rules + real-time intel |
 | Execution | REST polling every N min | WebSocket event-driven (fills in <1s) |
 | Strategy | Hardcoded | AI-generated, auto-backtested, lifecycle-managed |
-| Memory | Stateless | Dream Worker autonomously merges/prunes every 6h |
+| Memory | Stateless | Dream Worker checks every 2h, runs at most every 6h when enough notes exist |
 | Backtest | LLM-in-the-loop (slow, non-reproducible) | Deterministic condition evaluator (fast, reproducible) |
 
 ## Architecture
@@ -72,7 +72,7 @@ Most "AI trading bots" are either:
 │   Scanner ─── 540+ pairs ─── Researcher ─── Momentum trade   │
 │                                                              │
 │   Compound ── review trades ── generate rules ── evolve      │
-│   Dream Worker ── merge/prune/distill memories every 6h      │
+│   Dream Worker ── merge/prune/distill memories (checks 2h, runs ≤6h)      │
 │   Reviewer ── signal accuracy ── lesson extraction            │
 │   Strategist ── evaluate AI-generated strategies              │
 └─────────────────────────────────────────────────────────────┘
@@ -84,7 +84,7 @@ What makes Zhuge actually learn, not just execute:
 
 ```
 Layer 1: Expert Knowledge (RAG)
-│  48+ entries: Wyckoff, SMC, ICT, Kelly, Fib 0.31, OI divergence...
+│  30+ entries: Wyckoff, SMC, ICT, Kelly, Fib 0.31, OI divergence...
 │  Local Ollama embedding + LanceDB vector search
 │  Zero API cost, 110ms retrieval
 │
@@ -104,15 +104,15 @@ Layer 3: Real-Time Intelligence
 
 ## Event-Driven Execution
 
-No polling. No `setTimeout` hacks. Real-time via Bitget Private WebSocket:
+Primary execution path is event-driven via Bitget Private WebSocket:
 
 ```
-Order fill    → WS orders channel    → entry/exit price instantly → DB updated
-Position close → WS positions channel → PnL calculated → reviewer triggered
-Balance change → WS account channel   → equity cached  → risk agent reads cache
+Order fill     → WS orders channel     → entry/exit price + PnL → reviewer triggered
+Position gone  → WS positions channel  → fallback close detection (marks 'closing')
+Balance change → WS account channel    → equity cached → risk agent reads from cache
 
-REST sync runs every 30min as fallback (5min when WS is unhealthy).
-Adaptive: system knows when to trust WS vs when to fall back to REST.
+REST sync runs adaptively: 30min when WS is healthy, 5min when it's not.
+Analysis loop and WS reconnection still use timers — "event-driven" applies to trade execution, not the whole system.
 ```
 
 ## Risk Controls
@@ -124,15 +124,15 @@ Zhuge is paranoid by design. Every trade passes through multiple safety gates:
 - **Consecutive loss cooldown:** 3+ losses (5 in scaling mode) → 1h mandatory cooldown
 - **Kelly criterion sizing:** Half-Kelly capped at 25% of available margin
 - **4-level graduated scaling:** Scout small, scale only with increasing confidence + price confirmation
-- **No LLM-generated strategy trades directly:** Must survive one compound review cycle first
-- **Deterministic backtest gate:** New strategies auto-backtest 14 days, <20% win rate → retired
+- **Strategy gate:** New strategies auto-backtest 14 days on creation; win rate <20% → retired immediately
+- **Deterministic backtest:** New strategies auto-backtest 14 days on creation, <20% win rate → retired
 
 ## Tech Stack
 
 | Component | Choice | Why |
 |-----------|--------|-----|
 | Runtime | Node.js (ESM) | Single-threaded event loop fits trading pipeline |
-| Database | SQLite (WAL mode) | 21 tables, zero ops, single-file backup |
+| Database | SQLite (WAL mode) | 22 tables, zero ops, single-file backup |
 | Vector DB | LanceDB + Ollama | Local embedding, no API costs, 110ms search |
 | LLM | OpenAI-compatible API | Per-agent model selection, fallback chain |
 | Exchange | Bitget (Private WebSocket) | Event-driven fills, 540+ futures pairs |
@@ -207,7 +207,7 @@ Some non-obvious choices and why:
 - **No LLM in backtest.** LLM output is non-deterministic → backtest results aren't reproducible. Zhuge uses a pure `conditions.mjs` evaluator that's fast and consistent.
 - **Structured output via function calls.** Instead of asking LLMs to output JSON text (which fails ~5% of the time), agents call `submit_analysis()` / `submit_verdict()` tools. The schema is enforced by the function definition.
 - **Dream Worker limits.** Max 3 deletes + 3 merges + 2 creates per run. Without this, LLM hallucinations can wipe the entire memory in one bad cycle.
-- **Strategy lifecycle.** `proposed → backtest → active → retired`. No AI-generated strategy can trade real money without passing a backtest and surviving one compound review. This prevents LLM hallucinations from directly placing trades.
+- **Strategy lifecycle.** `proposed → active → retired`. High-confidence strategies activate immediately; others stay `proposed` until the next compound review promotes them. All new strategies are auto-backtested on creation — win rate <20% gets retired.
 - **WebSocket-first, REST-fallback.** Event-driven execution eliminates the 5-minute blind spot where positions could close without detection. REST polls adaptively: 30min when WS is healthy, 5min when it's not.
 - **Pessimistic backtest.** For long positions, check low (stop-loss) before high (take-profit) on each candle. This prevents systematic optimistic bias in backtest results.
 
