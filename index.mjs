@@ -110,7 +110,8 @@ const agentCompound = createCompound({ db: db.db, llm, provenance: agentProvenan
 _compoundRef.instance = agentCompound; // wire into scanner via getter
 
 // --- Dream Worker (memory consolidation) ---
-const dream = createDream({ db: db.db, llm, log, metrics, onComplete: (r) => pushEngine?.postDream?.(r) });
+const _dashboardRef = { instance: null };
+const dream = createDream({ db: db.db, llm, log, metrics, onComplete: (r) => _dashboardRef.instance?.postDream?.(r) });
 
 dream.start();
 
@@ -207,6 +208,7 @@ app.listen(config.PORT, () => {
     log.info('agent_bot_started', { module: 'index' });
     // Dashboard: scheduled TG posts (positions, observe, charts)
     const dashboard = createDashboard({ config, db: db.db, tgCall: agentBot.tgCall, health, metrics, log, dataSources, llm });
+    _dashboardRef.instance = dashboard;
     dashboard.start();
     // Primary Market: Base V3 pool listener (Phase 5)
     const primaryMarket = createPrimaryMarket({ config, pushEngine, tgCall: agentBot.tgCall, log, metrics });
