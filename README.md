@@ -1,169 +1,226 @@
-# 诸葛 (Zhuge) — Autonomous AI Trading System
+<div align="center">
 
-7 AI agents, real money, self-evolving knowledge. Named after Zhuge Liang: observe, plan, act.
+# 诸葛 Zhuge
 
-## What It Does
+**Self-hosted autonomous AI trading system with 7 collaborative agents.**
 
-A multi-agent system that trades crypto futures 24/7 on Bitget. The TG Agent (诸葛) is the commander; 6 sub-agents (analyst, risk, researcher, strategist, reviewer, dream worker) run autonomously. A three-layer knowledge architecture lets the system learn from expert knowledge, its own experience, and real-time data — forming a closed-loop that validates and evolves knowledge over time.
+*Observe. Plan. Act. Evolve.*
 
-~15,000 lines of code. 80+ files. 63 tests. 21 SQLite tables. One VPS.
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-21_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![Bitget](https://img.shields.io/badge/Bitget-USDT_Futures-00D084)](https://www.bitget.com/)
+[![Tests](https://img.shields.io/badge/tests-63_passing-brightgreen)]()
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+
+[English] [简体中文 (coming soon)]
+
+</div>
+
+---
+
+Zhuge is a **7-agent autonomous trading system** that runs 24/7 on a single VPS. It analyzes 540+ crypto futures markets, makes trade decisions through a multi-agent pipeline, executes on Bitget with Kelly-criterion sizing, and continuously evolves its own trading knowledge — all without human intervention.
+
+Not a chatbot wrapper. Not a backtesting framework. A self-improving trading machine that uses real money.
+
+## Why Zhuge?
+
+Most "AI trading bots" are either:
+- A single LLM call that outputs buy/sell (no risk management, no learning)
+- A rule-based system with "AI" in the name (no actual intelligence)
+- A paper-trading demo that never touches real money
+
+**Zhuge is different:**
+
+| | Typical Bot | Zhuge |
+|---|---|---|
+| Decision making | Single LLM call | 7 agents with distinct roles |
+| Risk management | Fixed stop-loss | Fail-closed risk gate + Kelly sizing + 4-level scaling |
+| Learning | None | Three-layer knowledge: expert RAG + self-discovered rules + real-time intel |
+| Execution | REST polling every N min | WebSocket event-driven (fills in <1s) |
+| Strategy | Hardcoded | AI-generated, auto-backtested, lifecycle-managed |
+| Memory | Stateless | Dream Worker autonomously merges/prunes every 6h |
+| Backtest | LLM-in-the-loop (slow, non-reproducible) | Deterministic condition evaluator (fast, reproducible) |
 
 ## Architecture
 
 ```
-Pipeline (AI-driven scheduling: analyst decides next_check_in)
-  ├── Data Collection
-  │     Crucix 27-source OSINT + OpenNews + OKX WebSocket
-  │
-  ├── Analyst Agent (9 tools, AI chooses which to call)
-  │     submit_analysis → structured output (no free-form JSON parsing)
-  │
-  ├── Risk Agent (fail-closed)
-  │     Hard rules: 24h loss >5% equity, consecutive losses → VETO
-  │     Soft rules: LLM evaluation via submit_verdict tool
-  │     Equity from WebSocket cache (zero-latency, no API call)
-  │
-  ├── Executor
-  │     Kelly criterion sizing (half-Kelly, capped 25%)
-  │     4-level graduated scaling (1:1:2:4 pyramid)
-  │     Bitget Private WebSocket: real-time fills + position close
-  │
-  └── Strategist Agent (AI-generated strategy evaluation)
+┌─────────────────────────────────────────────────────────────┐
+│                    PIPELINE (AI-driven scheduling)           │
+│                                                              │
+│   Crucix 27-source    OKX WebSocket    OpenNews AI-scored    │
+│        OSINT              prices            news             │
+│          │                  │                 │               │
+│          └──────────┬───────┘─────────────────┘               │
+│                     ▼                                         │
+│          ┌─────────────────────┐                              │
+│          │   Analyst Agent     │  9 tools, AI chooses which   │
+│          │   submit_analysis() │  structured output via fn    │
+│          └────────┬────────────┘                              │
+│                   ▼                                           │
+│          ┌─────────────────────┐                              │
+│          │    Risk Agent       │  Hard rules (code-level)     │
+│          │   submit_verdict()  │  + LLM soft evaluation       │
+│          │   equity from WS    │  Fail-closed: VETO default   │
+│          └────────┬────────────┘                              │
+│                   ▼                                           │
+│          ┌─────────────────────┐                              │
+│          │    Executor         │  Kelly sizing (half-Kelly)   │
+│          │   4-level scaling   │  1:1:2:4 pyramid             │
+│          │   WS event-driven   │  fills → DB in <1s           │
+│          └─────────────────────┘                              │
+│                                                              │
+│   Scanner ─── 540+ pairs ─── Researcher ─── Momentum trade   │
+│                                                              │
+│   Compound ── review trades ── generate rules ── evolve      │
+│   Dream Worker ── merge/prune/distill memories every 6h      │
+│   Reviewer ── signal accuracy ── lesson extraction            │
+│   Strategist ── evaluate AI-generated strategies              │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Scanner (540+ futures pairs)
-  ├── Researcher Agent (momentum scoring: volume/price/funding/narrative)
-  └── Auto open/close with TP/SL
+## Three-Layer Knowledge Architecture
 
-Three-Layer Knowledge Architecture
-  ├── Layer 1: Expert Knowledge (RAG)
-  │     48+ entries: Wyckoff, SMC, ICT, Kelly, Fib 0.31, OI divergence...
-  │     Local Ollama embedding + LanceDB vector search
-  ├── Layer 2: Self-Discovered Knowledge (Compound)
-  │     LLM reviews trades + vetoes + accuracy → generates rules
-  │     Rules control execution params (leverage, TP/SL, margin)
-  │     New strategies: proposed → backtest → active lifecycle
-  └── Layer 3: Real-Time Intelligence
-        Crucix OSINT + OKX prices + TG alerts + AI news
+What makes Zhuge actually learn, not just execute:
 
-Memory System
-  ├── Operational: context.md (what am I doing, what's next)
-  ├── Long-term: notes/ with frontmatter metadata, keyword recall
-  └── Dream Worker: every 6h, merge/prune/distill memories
-
-Backtest Engine
-  ├── Deterministic condition evaluator (conditions.mjs)
-  ├── Pessimistic TP/SL order (check adverse direction first)
-  ├── Same-candle re-entry guard (anti look-ahead bias)
-  └── New strategies auto-backtest 14 days before activation
-
-Observability
-  ├── 19 metric types (SQLite time-series)
-  ├── Structured JSON logging (31+ event types)
-  ├── OpenTelemetry → Jaeger (3-layer span model)
-  ├── Health alerts → Telegram
-  └── TG Supergroup Dashboard (positions, PnL, news, system health)
+```
+Layer 1: Expert Knowledge (RAG)
+│  48+ entries: Wyckoff, SMC, ICT, Kelly, Fib 0.31, OI divergence...
+│  Local Ollama embedding + LanceDB vector search
+│  Zero API cost, 110ms retrieval
+│
+Layer 2: Self-Discovered Knowledge (Compound)
+│  LLM reviews trade history + veto patterns + signal accuracy
+│  → auto-generates rules with confidence + evidence
+│  → rules directly control execution params (leverage, TP/SL, margin)
+│  → new strategies: proposed → backtest → active → retired
+│
+Layer 3: Real-Time Intelligence
+│  Crucix 27-source OSINT + OKX prices + TG alerts + AI news
+│
+└─ Feedback Loop:
+   Layer 1 → influences trades → results feed Layer 2
+   → Layer 2 validates Layer 1 effectiveness → evolves
 ```
 
 ## Event-Driven Execution
 
-Trade lifecycle is event-driven via Bitget Private WebSocket, not polling:
+No polling. No `setTimeout` hacks. Real-time via Bitget Private WebSocket:
 
 ```
-Order placed → WS orders channel → fillPrice on fill → DB updated instantly
-Position closed (TP/SL/liquidation) → WS positions channel → PnL calculated → reviewer triggered
-Account balance change → WS account channel → equity cached → risk agent reads from cache
+Order fill    → WS orders channel    → entry/exit price instantly → DB updated
+Position close → WS positions channel → PnL calculated → reviewer triggered
+Balance change → WS account channel   → equity cached  → risk agent reads cache
 
-REST API sync runs every 30min as fallback (5min when WS is unhealthy).
+REST sync runs every 30min as fallback (5min when WS is unhealthy).
+Adaptive: system knows when to trust WS vs when to fall back to REST.
 ```
+
+## Risk Controls
+
+Zhuge is paranoid by design. Every trade passes through multiple safety gates:
+
+- **Fail-closed risk gate:** Unknown state → VETO. Equity fetch fails → VETO. Parse error → VETO.
+- **24h loss limit:** Realized + unrealized > 5% of equity → all trading halted
+- **Consecutive loss cooldown:** 3+ losses (5 in scaling mode) → 1h mandatory cooldown
+- **Kelly criterion sizing:** Half-Kelly capped at 25% of available margin
+- **4-level graduated scaling:** Scout small, scale only with increasing confidence + price confirmation
+- **No LLM-generated strategy trades directly:** Must survive one compound review cycle first
+- **Deterministic backtest gate:** New strategies auto-backtest 14 days, <20% win rate → retired
 
 ## Tech Stack
 
-- **Runtime:** Node.js (ESM), single VPS, PM2
-- **Database:** SQLite (better-sqlite3), 21 tables, WAL mode
-- **Knowledge:** LanceDB + Ollama (local embedding, nomic-embed-text)
-- **LLM:** OpenAI-compatible API (per-agent model selection)
-- **Exchange:** Bitget CEX (USDT-FUTURES), Private WebSocket for real-time events
-- **Data:** Crucix OSINT (27 sources), OpenNews, OKX WebSocket
-- **Tracing:** OpenTelemetry → Jaeger (OTLP HTTP)
-- **Interface:** Telegram Bot (streaming, confirmation, supergroup dashboard)
-- **Tests:** Vitest (63 cases: indicators, Kelly, scaling, signals, memory)
+| Component | Choice | Why |
+|-----------|--------|-----|
+| Runtime | Node.js (ESM) | Single-threaded event loop fits trading pipeline |
+| Database | SQLite (WAL mode) | 21 tables, zero ops, single-file backup |
+| Vector DB | LanceDB + Ollama | Local embedding, no API costs, 110ms search |
+| LLM | OpenAI-compatible API | Per-agent model selection, fallback chain |
+| Exchange | Bitget (Private WebSocket) | Event-driven fills, 540+ futures pairs |
+| Data | Crucix (27 sources) + OpenNews | Macro + news + on-chain in one call |
+| Tracing | OpenTelemetry → Jaeger | 3-layer span model for full pipeline visibility |
+| Interface | Telegram Bot | Streaming responses, confirmation keyboards, supergroup dashboard |
+| Tests | Vitest | 63 cases: indicators, Kelly math, scaling, signals, memory |
 
-## Structure
-
-```
-├── index.mjs              — entry point, module wiring, AI-driven scheduling
-├── pipeline.mjs           — main loop: collect → analyze → trade
-├── config.mjs             — env config
-├── db.mjs                 — SQLite schema (21 tables)
-│
-├── agent/                 — TG Agent harness
-│   ├── llm.mjs            — LLM streaming + fallback
-│   ├── loop.mjs           — async generator agent loop
-│   ├── cognition/         — compound review + dream worker + conditions evaluator
-│   ├── knowledge/         — Trading RAG (LanceDB + Ollama)
-│   ├── memory/            — indexed recall with frontmatter metadata
-│   ├── tools/             — 20+ tools (data, system, trade, memory, RAG)
-│   ├── telegram/          — TG bot + streaming + confirmation
-│   ├── push/              — smart push engine + TG dashboard
-│   └── observe/           — metrics, logger, health, OTel tracing
-│
-├── agents/                — 6 autonomous sub-agents
-│   ├── analyst.mjs        — 9-tool market analysis + submit_analysis
-│   ├── risk.mjs           — fail-closed risk gate + submit_verdict
-│   ├── researcher.mjs     — coin momentum scoring
-│   ├── strategist.mjs     — strategy evaluation
-│   ├── reviewer.mjs       — lesson extraction + signal accuracy
-│   └── runner.mjs         — generic agent loop with tool calling
-│
-├── bitget/                — CEX integration
-│   ├── client.mjs         — REST API + signing + rate-limit backoff
-│   ├── ws.mjs             — Private WebSocket (orders/positions/account)
-│   ├── executor.mjs       — Kelly sizing, 4-level scaling, WS event handlers
-│   └── routes.mjs         — HTTP API
-│
-├── market/                — market data
-│   ├── prices.mjs         — OKX WebSocket + anomaly detection
-│   ├── scanner.mjs        — 540+ futures scanner
-│   ├── indicators.mjs     — RSI, EMA, MACD, ATR, Bollinger, Fib (pure math)
-│   └── signals.mjs        — signal accuracy tracking
-│
-├── backtest/              — deterministic backtest engine
-│   ├── engine.mjs         — candle replay + condition evaluation
-│   ├── simulator.mjs      — position management + PnL
-│   ├── loader.mjs         — Bitget historical candle loading
-│   └── report.mjs         — backtest result formatting
-│
-└── tests/                 — 63 unit tests (vitest)
-```
-
-## Key Design Decisions
-
-- **Event-driven, not polling:** Bitget Private WebSocket for fills/positions/equity. REST as fallback only.
-- **Structured LLM output:** Agents return results via function calls (submit_analysis, submit_verdict), not free-form JSON text.
-- **AI-driven scheduling:** Analyst decides `next_check_in` (10min-4h) based on volatility.
-- **Three-layer knowledge:** RAG (expert) + Compound (self-discovered) + Live (real-time), with feedback loop.
-- **Fail-closed safety:** Risk agent VETOs when equity unknown. All trades require risk approval.
-- **Kelly criterion sizing:** Half-Kelly capped at 25%, with 4-level graduated scaling.
-- **Deterministic backtest:** No LLM in backtest loop — pure condition evaluation. Pessimistic TP/SL order prevents optimistic bias.
-- **Strategy lifecycle:** proposed → backtest → active → retired. No LLM-generated strategy trades without surviving one compound review.
-- **Memory hygiene:** Dream Worker (6h) merges/prunes/distills. Max 3 delete + 3 merge + 2 create per run to prevent hallucination-driven memory wipe.
-
-## Setup
+## Quick Start
 
 ```bash
+git clone https://github.com/enderzcx/Zhuge.git
+cd Zhuge
 cp .env.example .env
-# Fill in: Bitget API keys, LLM endpoint, Telegram bot token
+# Fill in: Bitget API keys, LLM endpoint, Telegram bot token (optional)
 npm install
 node index.mjs
 ```
 
-Requires:
+### Requirements
+
 - Node.js 20+
-- Ollama running locally with `nomic-embed-text` model (for RAG)
-- Bitget API key with futures trading permission
-- OpenAI-compatible LLM endpoint
-- (Optional) Telegram bot for dashboard + commands
+- Ollama with `nomic-embed-text` model (for RAG knowledge search)
+- Bitget API key with USDT-FUTURES permission
+- OpenAI-compatible LLM endpoint (tested with gpt-4o-mini, gpt-5.4-mini)
+- (Optional) Telegram bot token for dashboard + natural language commands
+
+## Project Structure
+
+```
+├── index.mjs              — entry point, module wiring
+├── pipeline.mjs           — collect → analyze → trade loop
+├── config.mjs / db.mjs    — configuration + 21-table SQLite schema
+│
+├── agent/                 — TG Agent (诸葛) harness
+│   ├── cognition/         — compound review, dream worker, condition evaluator
+│   ├── knowledge/         — RAG (LanceDB + Ollama)
+│   ├── memory/            — indexed recall with frontmatter metadata
+│   ├── tools/             — 20+ tools (data, system, trade, memory)
+│   ├── push/              — smart push engine + TG dashboard
+│   └── observe/           — metrics, logger, health, OTel tracing
+│
+├── agents/                — 6 autonomous sub-agents
+│   ├── analyst.mjs        — 9 tools + submit_analysis (structured output)
+│   ├── risk.mjs           — fail-closed gate + submit_verdict
+│   ├── researcher.mjs     — coin momentum scoring (4 dimensions)
+│   ├── strategist.mjs     — AI strategy evaluation
+│   ├── reviewer.mjs       — lesson extraction + signal accuracy
+│   └── runner.mjs         — generic agent loop with tool calling
+│
+├── bitget/                — exchange integration
+│   ├── ws.mjs             — Private WebSocket (orders/positions/account)
+│   ├── client.mjs         — REST API + signing + rate-limit backoff
+│   └── executor.mjs       — Kelly sizing, 4-level scaling, WS handlers
+│
+├── market/                — market data
+│   ├── prices.mjs         — OKX WebSocket + anomaly detection
+│   ├── scanner.mjs        — 540+ futures scanner
+│   └── indicators.mjs     — RSI, EMA, MACD, ATR, Bollinger, Fib (pure math)
+│
+├── backtest/              — deterministic backtest engine
+│   ├── engine.mjs         — candle replay + condition evaluation
+│   └── simulator.mjs      — position management + PnL calculation
+│
+└── tests/                 — 63 unit tests (vitest)
+```
+
+## Design Decisions
+
+Some non-obvious choices and why:
+
+- **No LLM in backtest.** LLM output is non-deterministic → backtest results aren't reproducible. Zhuge uses a pure `conditions.mjs` evaluator that's fast and consistent.
+- **Structured output via function calls.** Instead of asking LLMs to output JSON text (which fails ~5% of the time), agents call `submit_analysis()` / `submit_verdict()` tools. The schema is enforced by the function definition.
+- **Dream Worker limits.** Max 3 deletes + 3 merges + 2 creates per run. Without this, LLM hallucinations can wipe the entire memory in one bad cycle.
+- **Strategy lifecycle.** `proposed → backtest → active → retired`. No AI-generated strategy can trade real money without passing a backtest and surviving one compound review. This prevents LLM hallucinations from directly placing trades.
+- **WebSocket-first, REST-fallback.** Event-driven execution eliminates the 5-minute blind spot where positions could close without detection. REST polls adaptively: 30min when WS is healthy, 5min when it's not.
+- **Pessimistic backtest.** For long positions, check low (stop-loss) before high (take-profit) on each candle. This prevents systematic optimistic bias in backtest results.
 
 ## License
 
-Private project. Source published for reference and portfolio purposes.
+AGPL-3.0. See [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+Built by [0xEnder](https://x.com/0xenderzcx) — AI Native Builder
+
+*If the code is running, the agents are trading.*
+
+</div>
