@@ -12,7 +12,7 @@
 [![Tests](https://img.shields.io/badge/tests-63_passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
-[English] [简体中文 (coming soon)]
+[English] [[简体中文](README_CN.md)]
 
 </div>
 
