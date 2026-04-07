@@ -123,7 +123,6 @@ const _dashboardRef = { instance: null };
 const dream = createDream({ db: db.db, llm, log, metrics, onComplete: (r) => _dashboardRef.instance?.postDream?.(r) });
 
 dream.start();
-taskScheduler.start();
 
 // --- RAG Knowledge Base ---
 const rag = createRAG({ config, log });
@@ -177,6 +176,7 @@ const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, b
 // Task Scheduler (agent-managed recurring jobs)
 const taskScheduler = createTaskScheduler({ db, pipeline, scanner, compound: agentCompound, log, metrics, pushEngine });
 _schedulerRef.instance = taskScheduler;
+taskScheduler.start();
 
 // --- Register routes ---
 registerAnalysisRoutes(app, { cache, agentMetrics: agentRunner.agentMetrics, priceStream, config, pipeline, db, signals });
