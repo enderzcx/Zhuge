@@ -48,9 +48,12 @@ export async function checkSkillWorthy(toolCalls, finalContent, { agentLLM }) {
   if (!_passesHeuristic(toolCalls)) return null;
   if (!agentLLM?.chat) return null;
 
-  const toolSummary = toolCalls.map(tc =>
-    `${tc.name}(${JSON.stringify(tc.args || {}).slice(0, 100)}) → ${(typeof tc.result === 'string' ? tc.result : '').slice(0, 80)}`
-  ).join('\n');
+  // Sanitize tool results to prevent prompt injection into memory
+  const _sanitize = (s) => s.replace(/[{}"]/g, '').replace(/\n/g, ' ').trim();
+  const toolSummary = toolCalls.map(tc => {
+    const result = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result || '');
+    return `<tool>${tc.name}</tool> → <result>${_sanitize(result.slice(0, 80))}</result>`;
+  }).join('\n');
 
   try {
     const result = await agentLLM.chat([
@@ -69,7 +72,7 @@ export async function checkSkillWorthy(toolCalls, finalContent, { agentLLM }) {
 
     const text = (result.content || '').trim();
     // Extract JSON from response
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const jsonMatch = text.match(/\{[\s\S]*?\}/);
     if (!jsonMatch) return null;
 
     const parsed = JSON.parse(jsonMatch[0]);

@@ -35,17 +35,25 @@ export function createHistory({ llm, db } = {}) {
   `) || null;
 
   /** Persist a message to DB (fire-and-forget). */
+  const _persistBatch = _db?.transaction?.((conversationId, msgs) => {
+    for (const msg of msgs) {
+      stmtInsert.run(
+        conversationId, msg.role, msg.content || null,
+        msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
+        msg.tool_call_id || null
+      );
+    }
+  }) || null;
+
   function _persist(conversationId, msg) {
     if (!stmtInsert) return;
     try {
       stmtInsert.run(
-        conversationId,
-        msg.role,
-        msg.content || null,
+        conversationId, msg.role, msg.content || null,
         msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
         msg.tool_call_id || null
       );
-    } catch {} // never break the app
+    } catch (e) { console.warn('[history] persist failed:', e.message); }
   }
 
   /**
@@ -69,7 +77,10 @@ export function createHistory({ llm, db } = {}) {
         const msg = { role: row.role };
         if (row.content) msg.content = row.content;
         if (row.tool_calls) {
-          try { msg.tool_calls = JSON.parse(row.tool_calls); } catch {}
+          try { msg.tool_calls = JSON.parse(row.tool_calls); } catch {
+            console.warn('[history] corrupt tool_calls JSON, row id:', row.id);
+            msg.content = '[tool_calls data corrupted]';
+          }
         }
         if (row.tool_call_id) msg.tool_call_id = row.tool_call_id;
         conv.messages.push(msg);

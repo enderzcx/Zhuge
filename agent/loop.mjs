@@ -120,11 +120,9 @@ export async function* agentLoop(conversationId, userMessage, deps) {
             description: executor.describeAction(fnName, args),
             toolCallId: tc.id,
           };
-          // Don't add placeholder to history — the confirm handler will
-          // execute the tool and add the real result when user confirms/denies.
-          // The loop will exit after this iteration; confirm handler re-invokes
-          // the loop with the updated history.
-          continue;
+          // Break immediately — don't execute remaining tool calls out of order.
+          // The confirm handler will resume the loop after user responds.
+          break;
         }
 
         yield { type: 'tool_start', name: fnName, args };
@@ -150,8 +148,8 @@ export async function* agentLoop(conversationId, userMessage, deps) {
       // Self-inspection: every SELF_CHECK_INTERVAL tool calls, nudge agent to reflect
       if (allToolCalls.length > 0 && allToolCalls.length % SELF_CHECK_INTERVAL === 0) {
         history.add(conversationId, {
-          role: 'user',
-          content: '[system] 自检时间：回顾你刚才的操作，哪些做对了？哪些可以改进？有什么需要记住的新经验？如果有，用 save_recallable_memory 保存。',
+          role: 'system',
+          content: '自检时间：回顾你刚才的操作，哪些做对了？哪些可以改进？有什么需要记住的新经验？如果有，用 save_recallable_memory 保存。',
         });
       }
 
