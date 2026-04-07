@@ -176,6 +176,10 @@ export function createIntelStream({ config, db }) {
       await _tgClient.connect();
       _stats.tgConnected = true;
 
+      // Prevent GramJS TIMEOUT errors from crashing the process
+      _tgClient._handleUpdate = _tgClient._handleUpdate || (() => {});
+      _tgClient.floodSleepThreshold = 60;
+
       const allChannels = [
         ...(INTEL.tg.channels?.crypto || []),
         ...(INTEL.tg.channels?.energy || []),
@@ -236,6 +240,16 @@ export function createIntelStream({ config, db }) {
       _log.error('TG init failed:', e.message);
       _stats.tgConnected = false;
     }
+
+    // Catch GramJS internal errors (TIMEOUT in update loop) to prevent process crash
+    process.on('unhandledRejection', (err) => {
+      if (err?.message === 'TIMEOUT' || err?.message?.includes('TIMEOUT')) {
+        _log.warn('GramJS TIMEOUT caught (non-fatal)');
+        return; // swallow — GramJS auto-reconnects
+      }
+      // Re-throw non-GramJS errors so they're handled normally
+      throw err;
+    });
   }
 
   // =========================================================================
