@@ -86,14 +86,31 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
             // Flush current stream
             await stream.finalize();
             // Request confirmation (blocks until user responds or timeout)
-            const { confirmed, result } = await confirmHandler.requestConfirm(chatId, event);
-            if (confirmed) {
-              // Tool was executed by confirm handler, continue loop
-              // The loop will re-call LLM with the tool result
-            }
+            const { confirmed, result: confirmResult } = await confirmHandler.requestConfirm(chatId, event);
             // Re-init stream for continued output
             await stream.init();
-            break;
+            // After confirm, the original loop has exited (break on hasConfirmPending).
+            // Re-invoke agentLoop so LLM sees the tool result and generates a reply.
+            const resumeLoop = agentLoop(conversationId, null, {
+              agentLLM, history, executor, modelSelector, buildSystemPrompt, log: _log, metrics: _m,
+              resumeAfterConfirm: true,
+            });
+            for await (const resumeEvent of resumeLoop) {
+              switch (resumeEvent.type) {
+                case 'text': stream.append(resumeEvent.text); break;
+                case 'tool_start': stream.setToolStatus(resumeEvent.name, 'running'); break;
+                case 'tool_result': stream.setToolStatus(resumeEvent.name, 'done'); break;
+                case 'done':
+                  await stream.finalize(resumeEvent.content);
+                  _m.record('tg_reply_latency_ms', Date.now() - replyStart);
+                  break;
+                case 'error':
+                  await stream.finalize(`Error: ${resumeEvent.error}`);
+                  break;
+              }
+            }
+            endSpan(msgSpan);
+            return; // Don't continue the outer loop (it already exited)
           }
 
           case 'done':

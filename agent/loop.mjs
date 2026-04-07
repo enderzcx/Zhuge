@@ -44,8 +44,10 @@ export async function* agentLoop(conversationId, userMessage, deps) {
       turnCount: history.turnCount(conversationId),
     });
 
-    // 2. Add user message to history
-    history.add(conversationId, { role: 'user', content: userMessage });
+    // 2. Add user message to history (skip if resuming after confirm — message already in history)
+    if (userMessage != null && !deps.resumeAfterConfirm) {
+      history.add(conversationId, { role: 'user', content: userMessage });
+    }
 
     // 3. Build system prompt (static + dynamic: compound rules, directives, state)
     const systemPrompt = await buildSystemPrompt({ conversationId, userMessage });
