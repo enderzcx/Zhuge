@@ -326,22 +326,7 @@ export function createIntelStream({ config, db }) {
     } catch (e) { _log.warn('daily-news poll failed:', e.message); }
   }
 
-  async function _pollBreaking() {
-    try {
-      const url = INTEL.apis.breaking.url;
-      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!res.ok) return;
-      const data = await res.json();
-      const articles = data.articles || data.data || [];
-      for (const a of articles) {
-        _ingest({
-          title: a.title || a.headline || '',
-          source: a.source || 'crypto-news',
-          link: a.link || a.url || '',
-        }, 'breaking');
-      }
-    } catch (e) { _log.warn('breaking poll failed:', e.message); }
-  }
+  // breaking news (cryptocurrency.cv) removed — 402 Payment Required, TG channels cover this
 
   async function _pollFearGreed() {
     try {
@@ -385,9 +370,7 @@ export function createIntelStream({ config, db }) {
     _pollDailyNews().catch(() => {});
     _intervals.push(setInterval(() => _pollDailyNews().catch(() => {}), INTEL.apis.dailyNews.interval));
 
-    // Breaking — run once now, then every 1h
-    _pollBreaking().catch(() => {});
-    _intervals.push(setInterval(() => _pollBreaking().catch(() => {}), INTEL.apis.breaking.interval));
+    // Breaking news removed (402 paid API) — TG channels cover breaking news
 
     // Fear & Greed — run once now, then every 6h
     _pollFearGreed().catch(() => {});

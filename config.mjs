@@ -133,7 +133,7 @@ export function createConfig() {
     },
     apis: {
       dailyNews: { url: 'https://ai.6551.io/open/free_hot', interval: 6 * 3600 * 1000 },
-      breaking:  { url: 'https://cryptocurrency.cv/api/breaking', interval: 3600 * 1000 },
+      // breaking removed — 402 paid API, TG channels cover this
       fearGreed: { url: 'https://cryptocurrency.cv/api/market/fear-greed', interval: 6 * 3600 * 1000 },
     },
     triggerThreshold: 80,
