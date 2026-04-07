@@ -347,6 +347,18 @@ export function createDB({ log } = {}) {
     CREATE INDEX IF NOT EXISTS idx_intel_score ON intel_items(score);
     CREATE INDEX IF NOT EXISTS idx_intel_created ON intel_items(created_at);
 
+    -- Conversation history: persists TG agent chat across restarts
+    CREATE TABLE IF NOT EXISTS conversation_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT,
+      tool_calls TEXT,
+      tool_call_id TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_conv_hist ON conversation_history(conversation_id, created_at);
+
     -- Scheduled tasks: agent-managed recurring jobs
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

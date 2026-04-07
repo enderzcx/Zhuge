@@ -111,7 +111,9 @@ let pushEngine = null; // initialized after bot creation
 
 // --- Agent Harness (Phase 2) ---
 const agentLLM = createAgentLLM(config, { log, metrics });
-const agentHistory = createHistory({ llm });
+const agentHistory = createHistory({ llm, db });
+const restoredConvs = agentHistory.restore();
+if (restoredConvs > 0) log.info('history_restored', { module: 'index', conversations: restoredConvs });
 const modelSelector = createModelSelector(config);
 const toolRegistry = createToolRegistry();
 const agentProvenance = createProvenance({ db: db.db, log });

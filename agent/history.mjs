@@ -1,11 +1,12 @@
 /**
- * Conversation history manager — 3-layer context compression.
+ * Conversation history manager — 3-layer context compression + SQLite persistence.
  *
  * Layer 1: Tool Result Budgeting — truncate single tool output > MAX_TOOL_CHARS
  * Layer 2: Sliding Window — keep last WINDOW_SIZE turns
  * Layer 3: Auto-Summarize — when exceeding window, compress old turns via LLM
  *
- * Storage: in-memory Map keyed by conversationId, with TTL cleanup.
+ * Persistence: each message written to conversation_history table.
+ * On startup, restore() rebuilds in-memory Map from DB (within TTL).
  */
 
 const WINDOW_SIZE = 20;       // max turns before compression
@@ -14,13 +15,73 @@ const MAX_TOOL_CHARS = 2000;  // truncate tool results beyond this
 const HISTORY_TTL = 60 * 60 * 1000; // 1h conversation timeout
 const MAX_CONVERSATIONS = 50; // prevent memory leak
 
-export function createHistory({ llm } = {}) {
-  // conversationId → { messages: [], lastActive: timestamp, summary: string|null }
+export function createHistory({ llm, db } = {}) {
   const store = new Map();
+  const _db = db?.db || db || null;
+
+  // Prepared statements (only if DB available)
+  const stmtInsert = _db?.prepare?.(`
+    INSERT INTO conversation_history (conversation_id, role, content, tool_calls, tool_call_id)
+    VALUES (?, ?, ?, ?, ?)
+  `) || null;
+  const stmtLoadRecent = _db?.prepare?.(`
+    SELECT conversation_id, role, content, tool_calls, tool_call_id, created_at
+    FROM conversation_history
+    WHERE created_at > datetime('now', ?)
+    ORDER BY id
+  `) || null;
+  const stmtPrune = _db?.prepare?.(`
+    DELETE FROM conversation_history WHERE created_at < datetime('now', ?)
+  `) || null;
+
+  /** Persist a message to DB (fire-and-forget). */
+  function _persist(conversationId, msg) {
+    if (!stmtInsert) return;
+    try {
+      stmtInsert.run(
+        conversationId,
+        msg.role,
+        msg.content || null,
+        msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
+        msg.tool_call_id || null
+      );
+    } catch {} // never break the app
+  }
 
   /**
-   * Get or create conversation history.
+   * Restore conversations from DB (called once on startup).
+   * Rebuilds in-memory Map from messages within TTL.
    */
+  function restore() {
+    if (!stmtLoadRecent) return 0;
+    try {
+      const ttlStr = `-${Math.round(HISTORY_TTL / 1000)} seconds`;
+      const rows = stmtLoadRecent.all(ttlStr);
+      let restored = 0;
+
+      for (const row of rows) {
+        let conv = store.get(row.conversation_id);
+        if (!conv) {
+          conv = { messages: [], lastActive: new Date(row.created_at + 'Z').getTime(), summary: null };
+          store.set(row.conversation_id, conv);
+          restored++;
+        }
+        const msg = { role: row.role };
+        if (row.content) msg.content = row.content;
+        if (row.tool_calls) {
+          try { msg.tool_calls = JSON.parse(row.tool_calls); } catch {}
+        }
+        if (row.tool_call_id) msg.tool_call_id = row.tool_call_id;
+        conv.messages.push(msg);
+        conv.lastActive = Math.max(conv.lastActive, new Date(row.created_at + 'Z').getTime());
+      }
+      return restored;
+    } catch (e) {
+      console.error('[history] restore failed:', e.message);
+      return 0;
+    }
+  }
+
   function _get(conversationId) {
     let conv = store.get(conversationId);
     if (!conv) {
@@ -31,95 +92,52 @@ export function createHistory({ llm } = {}) {
     return conv;
   }
 
-  /**
-   * Layer 1: Budget tool result content.
-   */
   function budgetToolResult(content) {
     if (typeof content !== 'string') content = JSON.stringify(content);
     if (content.length <= MAX_TOOL_CHARS) return content;
     return content.slice(0, MAX_TOOL_CHARS) + `\n...[truncated ${content.length - MAX_TOOL_CHARS} chars]`;
   }
 
-  /**
-   * Add a message to conversation history.
-   * @param {string} conversationId
-   * @param {{ role: string, content?: string, tool_calls?: any[], tool_call_id?: string }} msg
-   */
   function add(conversationId, msg) {
     const conv = _get(conversationId);
-
-    // Layer 1: budget tool results
     if (msg.role === 'tool' && msg.content) {
       msg = { ...msg, content: budgetToolResult(msg.content) };
     }
-
     conv.messages.push(msg);
+    _persist(conversationId, msg);
   }
 
-  /**
-   * Add the full assistant message (may contain tool_calls).
-   */
   function addAssistant(conversationId, message) {
     const conv = _get(conversationId);
     conv.messages.push(message);
+    _persist(conversationId, message);
   }
 
-  /**
-   * Get messages for LLM call. Applies Layer 2 + 3 if needed.
-   * @param {string} conversationId
-   * @returns {object[]} messages array (without system prompt — caller adds that)
-   */
   async function getMessages(conversationId) {
     const conv = _get(conversationId);
     const msgs = conv.messages;
-
-    // Count user messages as turns (consistent with exported turnCount())
     const turns = msgs.filter(m => m.role === 'user').length;
-
-    if (turns <= WINDOW_SIZE) {
-      return [...msgs];
-    }
-
-    // Layer 3: compress old messages
+    if (turns <= WINDOW_SIZE) return [...msgs];
     await _compress(conv);
     return [...msgs];
   }
 
-  /**
-   * Layer 3: Auto-summarize old turns.
-   * Keep last KEEP_RECENT user turns (+ their tool chains), compress the rest.
-   * Split is tool-call-boundary-aware: never splits between assistant(tool_calls) and tool results.
-   */
   async function _compress(conv) {
     const msgs = conv.messages;
-
-    // Find the split point: keep last KEEP_RECENT user messages.
-    // Walk backwards, count user messages. The split point must be at a "safe"
-    // boundary: before a user message, never between assistant(tool_calls) and tool results.
     let keepFrom = msgs.length;
     let usersSeen = 0;
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].role === 'user') {
         usersSeen++;
-        if (usersSeen >= KEEP_RECENT) {
-          keepFrom = i;
-          break;
-        }
+        if (usersSeen >= KEEP_RECENT) { keepFrom = i; break; }
       }
     }
-
-    // Ensure we don't split inside a tool_call→tool sequence.
-    // Walk keepFrom backwards to find a safe boundary (a user message start).
-    while (keepFrom > 0 && msgs[keepFrom].role === 'tool') {
-      keepFrom--;
-    }
+    while (keepFrom > 0 && msgs[keepFrom].role === 'tool') keepFrom--;
 
     const oldMessages = msgs.slice(0, keepFrom);
     const recentMessages = msgs.slice(keepFrom);
-
     if (oldMessages.length === 0) return;
 
-    // Summarize old messages
     let summary;
     if (llm) {
       try {
@@ -130,7 +148,6 @@ export function createHistory({ llm } = {}) {
         const result = await llm(summaryPrompt, { max_tokens: 300, timeout: 15000 });
         summary = result.content || result;
       } catch {
-        // Fallback: mechanical summary
         summary = `[前 ${oldMessages.length} 条消息已压缩]`;
       }
     } else {
@@ -138,7 +155,6 @@ export function createHistory({ llm } = {}) {
     }
 
     conv.summary = summary;
-    // Replace messages: summary as first user message + recent
     conv.messages = [
       { role: 'user', content: `[对话摘要] ${summary}` },
       { role: 'assistant', content: '好的，我已了解之前的对话内容。' },
@@ -146,42 +162,34 @@ export function createHistory({ llm } = {}) {
     ];
   }
 
-  /**
-   * Get turn count for a conversation.
-   */
   function turnCount(conversationId) {
     const conv = store.get(conversationId);
     if (!conv) return 0;
     return conv.messages.filter(m => m.role === 'user').length;
   }
 
-  /**
-   * Clear a conversation.
-   */
   function clear(conversationId) {
     store.delete(conversationId);
   }
 
-  /**
-   * Prune expired conversations.
-   */
   function prune() {
     const cutoff = Date.now() - HISTORY_TTL;
     for (const [id, conv] of store) {
       if (conv.lastActive < cutoff) store.delete(id);
     }
-    // Hard cap
     if (store.size > MAX_CONVERSATIONS) {
       const sorted = [...store.entries()].sort((a, b) => a[1].lastActive - b[1].lastActive);
       const toRemove = sorted.slice(0, store.size - MAX_CONVERSATIONS);
       for (const [id] of toRemove) store.delete(id);
     }
+    // DB cleanup: remove messages older than TTL
+    if (stmtPrune) {
+      try { stmtPrune.run(`-${Math.round(HISTORY_TTL / 1000)} seconds`); } catch {}
+    }
   }
 
-  // Auto-prune every 10 minutes
   const pruneTimer = setInterval(prune, 10 * 60 * 1000);
-
   function stop() { clearInterval(pruneTimer); }
 
-  return { add, addAssistant, getMessages, turnCount, clear, prune, stop, budgetToolResult };
+  return { add, addAssistant, getMessages, turnCount, clear, prune, stop, budgetToolResult, restore };
 }

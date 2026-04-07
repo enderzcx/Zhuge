@@ -15,7 +15,11 @@
  *   - Record metrics
  */
 
+import { checkSkillWorthy } from './cognition/skill-check.mjs';
+import { saveRecallableMemory } from './memory/recall.mjs';
+
 const MAX_ROUNDS = 8;
+const SELF_CHECK_INTERVAL = 15; // self-inspect every N tool calls
 
 /**
  * @param {object} deps
@@ -143,6 +147,14 @@ export async function* agentLoop(conversationId, userMessage, deps) {
         });
       }
 
+      // Self-inspection: every SELF_CHECK_INTERVAL tool calls, nudge agent to reflect
+      if (allToolCalls.length > 0 && allToolCalls.length % SELF_CHECK_INTERVAL === 0) {
+        history.add(conversationId, {
+          role: 'user',
+          content: '[system] 自检时间：回顾你刚才的操作，哪些做对了？哪些可以改进？有什么需要记住的新经验？如果有，用 save_recallable_memory 保存。',
+        });
+      }
+
       // If any tool needs confirmation, pause the loop.
       // The confirm handler will resume by adding tool results and re-calling agentLoop.
       if (hasConfirmPending) break;
@@ -176,6 +188,22 @@ export async function* agentLoop(conversationId, userMessage, deps) {
           }
         }
       }
+    }
+
+    // Skill distillation: if 5+ tool calls, check if worth saving as reusable knowledge
+    if (allToolCalls.length >= 5 && !deps.resumeAfterConfirm) {
+      try {
+        const skill = await checkSkillWorthy(allToolCalls, finalContent, { agentLLM });
+        if (skill) {
+          saveRecallableMemory({
+            name: skill.title,
+            description: skill.description,
+            type: 'feedback',
+            content: skill.content,
+          });
+          _log.info('skill_created', { module: 'agent-loop', title: skill.title, tools: allToolCalls.length });
+        }
+      } catch {} // never block main flow
     }
 
     // Done
