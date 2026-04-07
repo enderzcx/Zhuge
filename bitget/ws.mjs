@@ -90,7 +90,7 @@ export function createBitgetWS(config, { log, metrics } = {}) {
 
         // Auth response
         if (msg.event === 'login') {
-          if (msg.code === '0') {
+          if (String(msg.code) === '0') {
             _authenticated = true;
             _log.info('bitget_ws_auth_ok', { module: 'bitget_ws' });
             _subscribe();
