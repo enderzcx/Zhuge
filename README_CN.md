@@ -47,7 +47,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                  流水线（AI 自适应调度）                        │
 │                                                              │
-│   Crucix 27源       OKX WebSocket      OpenNews AI 评分      │
+│   Crucix 27源       OKX WebSocket      Intel Stream          │
 │     OSINT              实时价格             新闻              │
 │       │                  │                  │                │
 │       └──────────┬───────┘──────────────────┘                │
@@ -94,8 +94,11 @@
 │  → 规则直接控制执行参数（杠杆、止盈止损、保证金）
 │  → 新策略生命周期：proposed → 回测 → active → retired
 │
-第三层：实时情报
-│  Crucix 27源 OSINT + OKX 价格 + TG 快讯 + AI 新闻
+第三层：实时情报 (Intel Stream)
+│  12 TG 公共频道 (GramJS, 2min 轮询) — Crypto + 石油/能源
+│  OpenTwitter API — KOL 推文、关键词搜索、上币公告
+│  Crucix 27源 OSINT + OKX 实时价格
+│  恐慌贪婪指数 + daily-news 聚合
 │
 └─ 反馈闭环：
    第一层 → 影响交易 → 结果喂给第二层
@@ -135,7 +138,8 @@ REST 同步自适应：WS 健康时 30min，不健康时 5min。
 | 向量库 | LanceDB + Ollama | 本地向量化，零 API 成本，110ms 检索 |
 | LLM | OpenAI 兼容 API | 每个 Agent 独立选模型，自动降级链 |
 | 交易所 | Bitget（私有 WebSocket） | 事件驱动成交推送，540+ 合约对 |
-| 数据 | Crucix (27 源) + OpenNews | 宏观 + 新闻 + 链上一个调用搞定 |
+| 情报 | Intel Stream (TG + OpenTwitter + APIs) | 12 TG 频道实时 + Twitter KOL 搜索 + 恐慌贪婪指数 |
+| 数据 | Crucix (27 源) | 宏观 + 地缘 + 能源一个调用搞定 |
 | 链路追踪 | OpenTelemetry → Jaeger | 3 层 span 模型，全链路可观测 |
 | 交互 | Telegram Bot | 流式回复、确认键盘、超级群组仪表板 |
 | 测试 | Vitest | 63 个用例：指标、Kelly 数学、建仓、信号、记忆 |

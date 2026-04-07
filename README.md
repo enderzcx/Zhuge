@@ -7,7 +7,7 @@
 *Observe. Plan. Act. Evolve.*
 
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![SQLite](https://img.shields.io/badge/SQLite-21_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-22_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Bitget](https://img.shields.io/badge/Bitget-USDT_Futures-00D084)](https://www.bitget.com/)
 [![Tests](https://img.shields.io/badge/tests-63_passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
@@ -36,6 +36,7 @@ Most "AI trading bots" are either:
 | Decision making | Single LLM call | 7 agents with distinct roles |
 | Risk management | Fixed stop-loss | Fail-closed risk gate + Kelly sizing + 4-level scaling |
 | Learning | None | Three-layer knowledge: expert RAG + self-discovered rules + real-time intel |
+| Data sources | Single news API | 12 TG channels + Twitter KOL search + 27-source OSINT + Fear & Greed |
 | Execution | REST polling every N min | WebSocket event-driven (fills in <1s) |
 | Strategy | Hardcoded | AI-generated, auto-backtested, lifecycle-managed |
 | Memory | Stateless | Dream Worker checks every 2h, runs at most every 6h when enough notes exist |
@@ -47,8 +48,8 @@ Most "AI trading bots" are either:
 ┌─────────────────────────────────────────────────────────────┐
 │                    PIPELINE (AI-driven scheduling)           │
 │                                                              │
-│   Crucix 27-source    OKX WebSocket    OpenNews AI-scored    │
-│        OSINT              prices            news             │
+│   Crucix 27-source    OKX WebSocket    Intel Stream           │
+│        OSINT              prices       (TG + APIs + X)       │
 │          │                  │                 │               │
 │          └──────────┬───────┘─────────────────┘               │
 │                     ▼                                         │
@@ -94,8 +95,11 @@ Layer 2: Self-Discovered Knowledge (Compound)
 │  → rules directly control execution params (leverage, TP/SL, margin)
 │  → new strategies: proposed → backtest → active → retired
 │
-Layer 3: Real-Time Intelligence
-│  Crucix 27-source OSINT + OKX prices + TG alerts + AI news
+Layer 3: Real-Time Intelligence (Intel Stream)
+│  12 TG channels (GramJS, 2min poll) — crypto + energy
+│  OpenTwitter API — KOL tweets, keyword search, listing alerts
+│  Crucix 27-source OSINT + OKX prices
+│  Fear & Greed Index + daily-news aggregator
 │
 └─ Feedback Loop:
    Layer 1 → influences trades → results feed Layer 2
@@ -115,6 +119,33 @@ REST sync runs adaptively: 30min when WS is healthy, 5min when it's not.
 Analysis loop and WS reconnection still use timers — "event-driven" applies to trade execution, not the whole system.
 ```
 
+## Intel Stream
+
+Real-time market intelligence from multiple sources, unified into a single feed:
+
+```
+TG Channels (GramJS, 2min poll)          Low-freq APIs (6h)
+├─ Whale Alert (whale transfers)          ├─ daily-news (6551.io)
+├─ Binance Killers (signals)              └─ Fear & Greed Index
+├─ Cointelegraph (breaking news)
+├─ CryptoNinjas (trade signals)          Agent Tools (on-demand)
+├─ Glassnode (on-chain data)              ├─ search_twitter (keyword)
+├─ Oil Trading (energy)                   ├─ get_kol_tweets (KOL feed)
+├─ Energy Today                           ├─ get_listing_news (exchange)
+└─ + 5 more channels                     └─ get_onchain_signals (whale)
+         │                                          │
+         └─────────────┬───────────────────────────┘
+                       ▼
+             Intel EventBus
+             hash dedup → impact score (0-100) → route
+             ≥80: instant analysis trigger
+             all: cached for Analyst consumption
+```
+
+Each incoming item is deduplicated (MD5), scored by keyword rules (no LLM cost), and routed:
+- Score ≥80 triggers an instant analysis cycle (same mechanism as price anomaly detection)
+- All items are cached and available to the Analyst via `get_intel_feed` and `fetch_news` tools
+
 ## Risk Controls
 
 Zhuge is paranoid by design. Every trade passes through multiple safety gates:
@@ -132,14 +163,17 @@ Zhuge is paranoid by design. Every trade passes through multiple safety gates:
 | Component | Choice | Why |
 |-----------|--------|-----|
 | Runtime | Node.js (ESM) | Single-threaded event loop fits trading pipeline |
-| Database | SQLite (WAL mode) | 22 tables, zero ops, single-file backup |
+| Database | SQLite (WAL mode) | 23 tables, zero ops, single-file backup |
 | Vector DB | LanceDB + Ollama | Local embedding, no API costs, 110ms search |
 | LLM | OpenAI-compatible API | Per-agent model selection, fallback chain |
 | Exchange | Bitget (Private WebSocket) | Event-driven fills, 540+ futures pairs |
-| Data | Crucix (27 sources) + OpenNews | Macro + news + on-chain in one call |
+| Intel | Intel Stream (TG + OpenTwitter + APIs) | 12 TG channels real-time + Twitter KOL search + Fear & Greed |
+| Data | Crucix (27 sources) | Macro + geopolitical + energy in one call |
 | Tracing | OpenTelemetry → Jaeger | 3-layer span model for full pipeline visibility |
 | Interface | Telegram Bot | Streaming responses, confirmation keyboards, supergroup dashboard |
 | Tests | Vitest | 63 cases: indicators, Kelly math, scaling, signals, memory |
+| Twitter | OpenTwitter API (ai.6551.io) | KOL monitoring, search, listing alerts — no API key needed |
+| TG Monitor | GramJS (MTProto) | 12 public channels: crypto + oil/energy, 2min poll |
 
 ## Quick Start
 
@@ -165,13 +199,13 @@ node index.mjs
 ```
 ├── index.mjs              — entry point, module wiring
 ├── pipeline.mjs           — collect → analyze → trade loop
-├── config.mjs / db.mjs    — configuration + 21-table SQLite schema
+├── config.mjs / db.mjs    — configuration + 22-table SQLite schema
 │
 ├── agent/                 — TG Agent (诸葛) harness
 │   ├── cognition/         — compound review, dream worker, condition evaluator
 │   ├── knowledge/         — RAG (LanceDB + Ollama)
 │   ├── memory/            — indexed recall with frontmatter metadata
-│   ├── tools/             — 20+ tools (data, system, trade, memory)
+│   ├── tools/             — 44 tools (data, system, trade, memory, twitter, intel)
 │   ├── push/              — smart push engine + TG dashboard
 │   └── observe/           — metrics, logger, health, OTel tracing
 │
@@ -187,6 +221,11 @@ node index.mjs
 │   ├── ws.mjs             — Private WebSocket (orders/positions/account)
 │   ├── client.mjs         — REST API + signing + rate-limit backoff
 │   └── executor.mjs       — Kelly sizing, 4-level scaling, WS handlers
+│
+├── integrations/          — external data sources
+│   ├── intel.mjs          — Intel Stream: TG channels (GramJS) + API pollers
+│   ├── data-sources.mjs   — Crucix OSINT + news fetch (backed by Intel cache)
+│   └── telegram.mjs       — TG alert sender
 │
 ├── market/                — market data
 │   ├── prices.mjs         — OKX WebSocket + anomaly detection
