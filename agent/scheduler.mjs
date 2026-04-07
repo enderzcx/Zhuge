@@ -19,9 +19,9 @@ export function createTaskScheduler({ db, pipeline, scanner, compound, log, metr
 
   // Prepared statements
   const stmtDue = _db.prepare(`SELECT * FROM scheduled_tasks WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at`);
-  const stmtUpdateRun = _db.prepare(`UPDATE scheduled_tasks SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1, last_error = NULL, updated_at = datetime('now') WHERE task_id = ?`);
-  const stmtUpdateError = _db.prepare(`UPDATE scheduled_tasks SET error_count = error_count + 1, last_error = ?, updated_at = datetime('now') WHERE task_id = ?`);
-  const stmtDisable = _db.prepare(`UPDATE scheduled_tasks SET enabled = 0, updated_at = datetime('now') WHERE task_id = ?`);
+  const stmtUpdateRun = _db.prepare(`UPDATE scheduled_tasks SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1, last_error = NULL WHERE task_id = ?`);
+  const stmtUpdateError = _db.prepare(`UPDATE scheduled_tasks SET error_count = error_count + 1, last_error = ? WHERE task_id = ?`);
+  const stmtDisable = _db.prepare(`UPDATE scheduled_tasks SET enabled = 0 WHERE task_id = ?`);
   const stmtInsertRun = _db.prepare(`INSERT INTO scheduled_task_runs (task_id, status, duration_ms, result_summary, error_message) VALUES (?, ?, ?, ?, ?)`);
 
   // --- Built-in action executors ---
