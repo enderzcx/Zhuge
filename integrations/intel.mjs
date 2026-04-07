@@ -216,8 +216,11 @@ export function createIntelStream({ config, db }) {
     try {
       const { Scraper } = await import('agent-twitter-client');
       _scraper = new Scraper();
-      // Login via cookies (auth_token from x.com DevTools)
-      const cookies = [`auth_token=${INTEL.x.authToken}`];
+      // Login via cookies (from x.com DevTools → Application → Cookies)
+      const cookies = [];
+      if (INTEL.x.authToken) cookies.push(`auth_token=${INTEL.x.authToken}; Domain=.twitter.com; Path=/`);
+      if (INTEL.x.ct0) cookies.push(`ct0=${INTEL.x.ct0}; Domain=.twitter.com; Path=/`);
+      if (INTEL.x.twid) cookies.push(`twid=${INTEL.x.twid}; Domain=.twitter.com; Path=/`);
       await _scraper.setCookies(cookies);
       const loggedIn = await _scraper.isLoggedIn();
       if (!loggedIn) {
