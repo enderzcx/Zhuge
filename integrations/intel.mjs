@@ -10,6 +10,7 @@
  */
 
 import { createHash } from 'crypto';
+import { startRootSpan, endSpan } from '../agent/observe/tracing.mjs';
 
 // Catch GramJS TIMEOUT errors globally BEFORE any client is created
 // Must be at module level to catch errors during import/init phase
@@ -26,9 +27,10 @@ function _installGramjsErrorHandler() {
   });
 }
 
-export function createIntelStream({ config, db }) {
+export function createIntelStream({ config, db, metrics }) {
   const INTEL = config.INTEL || {};
   const _log = { info: (...a) => console.log('[Intel]', ...a), error: (...a) => console.error('[Intel]', ...a), warn: (...a) => console.warn('[Intel]', ...a) };
+  const _m = metrics || { record() {} };
 
   _installGramjsErrorHandler();
 
@@ -132,6 +134,7 @@ export function createIntelStream({ config, db }) {
     deduped.score = _scoreItem(deduped);
     deduped.category = _classify(deduped);
     _stats.itemsIngested++;
+    _m.record('intel_ingested', 1, { source: deduped.origin || 'unknown' });
 
     // Persist to DB
     try {
@@ -221,6 +224,7 @@ export function createIntelStream({ config, db }) {
       // Active polling: fetch recent messages every 2 min (reliable fallback)
       async function _pollTgChannels() {
         if (!_tgClient?.connected) return;
+        const { span: pollSpan } = startRootSpan('intel:tg_poll', { channels: allChannels.length });
         for (const ch of allChannels) {
           try {
             const msgs = await _tgClient.getMessages(ch, { limit: 5 });
@@ -237,6 +241,7 @@ export function createIntelStream({ config, db }) {
             }
           } catch { /* single channel fail not critical */ }
         }
+        endSpan(pollSpan);
         // Cap seen IDs set
         if (_tgSeenIds.size > 10000) {
           const arr = [..._tgSeenIds];
@@ -264,6 +269,7 @@ export function createIntelStream({ config, db }) {
   //  API POLLERS (low-frequency supplement)
   // =========================================================================
   async function _pollDailyNews() {
+    const { span: newsSpan } = startRootSpan('intel:news_poll');
     try {
       // Fetch multiple crypto subcategories
       for (const sub of ['defi', 'bitcoin', 'altcoin', 'market']) {
@@ -295,23 +301,26 @@ export function createIntelStream({ config, db }) {
           }
         } catch { /* subcategory fail not critical */ }
       }
-    } catch (e) { _log.warn('daily-news poll failed:', e.message); }
+      endSpan(newsSpan);
+    } catch (e) { endSpan(newsSpan, e); _log.warn('daily-news poll failed:', e.message); }
   }
 
   // breaking news (cryptocurrency.cv) removed — 402 Payment Required, TG channels cover this
 
   async function _pollFearGreed() {
+    const { span: fgSpan } = startRootSpan('intel:feargreed_poll');
     try {
       const url = INTEL.apis.fearGreed.url;
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) return;
+      if (!res.ok) { endSpan(fgSpan); return; }
       const data = await res.json();
       _fearGreedCache = {
         value: data.value ?? data.data?.value ?? data.fgi?.value ?? null,
         label: data.label ?? data.data?.label ?? data.fgi?.classification ?? null,
         ts: Date.now(),
       };
-    } catch (e) { _log.warn('fear-greed poll failed:', e.message); }
+      endSpan(fgSpan);
+    } catch (e) { endSpan(fgSpan, e); _log.warn('fear-greed poll failed:', e.message); }
   }
 
   // =========================================================================

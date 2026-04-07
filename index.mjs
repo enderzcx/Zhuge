@@ -28,6 +28,7 @@ import { createTelegram } from './integrations/telegram.mjs';
 import { createPipeline } from './pipeline.mjs';
 // Observability
 import { createMetrics } from './agent/observe/metrics.mjs';
+import { createPrometheus } from './agent/observe/prometheus.mjs';
 import { createLogger } from './agent/observe/logger.mjs';
 import { createHealthMonitor } from './agent/observe/health.mjs';
 import { initTracing, shutdownTracing } from './agent/observe/tracing.mjs';
@@ -70,6 +71,7 @@ initTracing('zhuge', process.env.OTEL_ENDPOINT);
 const { log, readLogs } = createLogger();
 const db = createDB({ log });
 const metrics = createMetrics(db.db);
+const prom = createPrometheus(metrics);
 // alertFn wired after pushEngine creation below
 const _alertRef = { fn: null };
 const health = createHealthMonitor(metrics, { log, alertFn: (msg) => _alertRef.fn?.(msg) });
@@ -80,7 +82,7 @@ const bitgetWS = createBitgetWS(config, { log, metrics });
 const messageBus = createMessageBus({ db });
 const agentRunner = createAgentRunner({ config, db, messageBus, metrics, log });
 const dataSources = createDataSources(config);
-const intelStream = createIntelStream({ config, db });
+const intelStream = createIntelStream({ config, db, metrics });
 dataSources.setIntelStream(intelStream);
 const priceStream = createPriceStream({ db, config, log, metrics });
 const signals = createSignalScoring({ db });
@@ -176,6 +178,12 @@ registerLearningRoutes(app, { db, signals });
 registerMarketRoutes(app, { db, priceStream });
 registerBitgetRoutes(app, { bitgetClient, log });
 registerLiFiRoutes(app, lifi);
+
+// --- Prometheus metrics endpoint ---
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', prom.contentType);
+  res.end(await prom.metricsText());
+});
 
 // --- Anomaly handler (price spike -> instant analysis) ---
 priceStream.setAnomalyHandler((anomaly) => {

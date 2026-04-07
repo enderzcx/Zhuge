@@ -9,6 +9,7 @@
 
 import { createTGStream } from './stream.mjs';
 import { agentLoop } from '../loop.mjs';
+import { startRootSpan, endSpan } from '../observe/tracing.mjs';
 
 const POLL_TIMEOUT = 25;     // seconds
 const POLL_BACKOFF_MS = 2000;
@@ -48,6 +49,7 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
    * Handle a user message — run agent loop, stream response.
    */
   async function handleMessage(chatId, text, messageId) {
+    const { span: msgSpan } = startRootSpan('tg:message', { chatId: String(chatId) });
     const conversationId = String(chatId);
     const stream = createTGStream(chatId, tgCall);
     await stream.init();
@@ -97,15 +99,18 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
           case 'done':
             await stream.finalize(event.content);
             _m.record('tg_reply_latency_ms', Date.now() - replyStart);
+            endSpan(msgSpan);
             break;
 
           case 'error':
             await stream.finalize(`Error: ${event.error}`);
             _m.record('error_count', 1, { module: 'tg-bot', type: 'agent_error' });
+            endSpan(msgSpan, new Error(event.error));
             break;
         }
       }
     } catch (err) {
+      endSpan(msgSpan, err);
       _log.error('handle_message_error', { module: 'tg-bot', error: err.message });
       await stream.finalize(`Error: ${err.message}`);
     }

@@ -8,6 +8,9 @@
  *   for await (const chunk of chatStream(messages, opts)) { ... }
  */
 
+import { startChildSpan, endSpan } from './observe/tracing.mjs';
+import { context } from '@opentelemetry/api';
+
 const DEFAULT_TIMEOUT = 60000;
 const DEFAULT_MAX_TOKENS = 1200;
 const DEFAULT_TEMP = 0.3;
@@ -23,6 +26,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
   async function chat(messages, opts = {}) {
     const model = opts.model || config.LLM_MODEL;
     const start = Date.now();
+    const { span } = startChildSpan(context.active(), 'llm:chat', { model });
 
     const body = {
       model,
@@ -67,6 +71,10 @@ export function createAgentLLM(config, { log, metrics } = {}) {
       _m.record('llm_tokens_in', usage.prompt_tokens || 0, { module: 'agent', model });
       _m.record('llm_tokens_out', usage.completion_tokens || 0, { module: 'agent', model });
 
+      span.setAttribute('tokens_in', usage.prompt_tokens || 0);
+      span.setAttribute('tokens_out', usage.completion_tokens || 0);
+      endSpan(span);
+
       return {
         message: msg,
         content: msg.content || '',
@@ -80,6 +88,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
         duration_ms: elapsed,
       };
     } catch (err) {
+      endSpan(span, err);
       _m.record('error_count', 1, { module: 'agent-llm', type: 'chat' });
       _log.error('llm_chat_error', { module: 'agent-llm', model, error: err.message });
       throw err;
@@ -96,6 +105,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
   async function* chatStream(messages, opts = {}) {
     const model = opts.model || config.LLM_MODEL;
     const start = Date.now();
+    const { span: streamSpan } = startChildSpan(context.active(), 'llm:stream', { model });
 
     const body = {
       model,
@@ -129,6 +139,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
       // Timeout or network error — fallback to non-streaming
       _log.warn('stream_fallback_to_chat', { module: 'agent-llm', error: err.message });
       const result = await chat(messages, { ...opts, model });
+      endSpan(streamSpan);
       yield { done: true, ...result };
       return;
     }
@@ -138,6 +149,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
       // Fallback model on payment/rate/server errors
       if ((res.status === 402 || res.status === 429 || res.status >= 500) && model !== FALLBACK_MODEL) {
         _log.warn('stream_fallback_model', { module: 'agent-llm', from: model, to: FALLBACK_MODEL, status: res.status });
+        endSpan(streamSpan);
         yield* chatStream(messages, { ...opts, model: FALLBACK_MODEL });
         return;
       }
@@ -153,6 +165,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
       const usage = data.usage || {};
       const elapsed = Date.now() - start;
       _m.record('llm_latency_ms', elapsed, { module: 'agent', model });
+      endSpan(streamSpan);
       yield {
         done: true,
         message: msg,
@@ -250,6 +263,7 @@ export function createAgentLLM(config, { log, metrics } = {}) {
     const message = { role: 'assistant', content: fullContent || null };
     if (toolCalls.length) message.tool_calls = toolCalls;
 
+    endSpan(streamSpan);
     yield {
       done: true,
       message,

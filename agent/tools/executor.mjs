@@ -5,6 +5,9 @@
  * Delegates needsConfirmation/describeAction to registry.
  */
 
+import { startChildSpan, endSpan } from '../observe/tracing.mjs';
+import { context } from '@opentelemetry/api';
+
 export function createToolExecutor({ registry, log, metrics }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
@@ -42,6 +45,7 @@ export function createToolExecutor({ registry, log, metrics }) {
       return JSON.stringify({ error: `Unknown tool: ${name}` });
     }
 
+    const { span } = startChildSpan(context.active(), `tool:${name}`, { tool: name });
     try {
       const result = await fn(args);
       const str = typeof result === 'string' ? result : JSON.stringify(result);
@@ -49,11 +53,13 @@ export function createToolExecutor({ registry, log, metrics }) {
       // Budget output
       const meta = registry.getToolMeta(name);
       const maxChars = meta?.maxResultChars || 2000;
+      endSpan(span);
       if (str.length > maxChars) {
         return str.slice(0, maxChars) + `\n...[truncated ${str.length - maxChars} chars]`;
       }
       return str;
     } catch (err) {
+      endSpan(span, err);
       _log.error('tool_exec_error', { module: 'executor', tool: name, error: err.message });
       _m.record('error_count', 1, { module: 'executor', type: name });
       return JSON.stringify({ error: err.message });
