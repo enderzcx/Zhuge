@@ -166,7 +166,7 @@ _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
 _alertRef.fn = (msg) => pushEngine.pushError({ source: 'health', message: msg }); // wire health alerts → TG
 
 // Create pipeline (after push engine)
-const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine });
+const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine, prom });
 
 // --- Register routes ---
 registerAnalysisRoutes(app, { cache, agentMetrics: agentRunner.agentMetrics, priceStream, config, pipeline, db, signals });

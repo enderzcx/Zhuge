@@ -8,7 +8,7 @@ import { context } from '@opentelemetry/api';
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
-export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine }) {
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine, prom }) {
 
   const { runAgent, agentMetrics } = agentRunner;
   const _metrics = metrics || { record() {} }; // fallback if not provided
@@ -169,6 +169,7 @@ Output ONLY the JSON, no other text.`;
       const sentimentKey = mode === 'stock' ? 'stock_sentiment' : 'crypto_sentiment';
       const sentimentVal = parsed[sentimentKey] || 0;
       log.info('analyst_result', { module: 'pipeline', mode, cycleId, risk: parsed.macro_risk_score, sentiment: sentimentVal, bias: parsed.technical_bias, action: parsed.recommended_action, push: parsed.push_worthy, tools: analystResult.toolCalls.length });
+      if (prom?.setConfidence) prom.setConfidence(parsed.confidence || 0);
 
       // Persist to SQLite (atomic: analysis + decision in one transaction)
       const _decisionArgs = [now, 'analyst', 'analyze', '', '', JSON.stringify(parsed),

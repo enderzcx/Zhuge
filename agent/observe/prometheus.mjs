@@ -106,6 +106,7 @@ export function createPrometheus(metrics) {
     system_event_loop_ms:  (v) => systemEventLoop.set(v),
     // Custom intel metric (recorded from intel.mjs)
     intel_ingested:        (v, t) => intelItems.inc({ source: t.source || '' }, v),
+    fear_greed_index:      (v) => fearGreed.set(v),
   };
 
   // --- Wrap existing metrics.record() ---

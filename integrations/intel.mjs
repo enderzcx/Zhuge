@@ -314,11 +314,13 @@ export function createIntelStream({ config, db, metrics }) {
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) { endSpan(fgSpan); return; }
       const data = await res.json();
+      const fgValue = data.value ?? data.data?.value ?? data.fgi?.value ?? data.current?.value ?? null;
       _fearGreedCache = {
-        value: data.value ?? data.data?.value ?? data.fgi?.value ?? null,
-        label: data.label ?? data.data?.label ?? data.fgi?.classification ?? null,
+        value: fgValue,
+        label: data.label ?? data.data?.label ?? data.fgi?.classification ?? data.current?.valueClassification ?? null,
         ts: Date.now(),
       };
+      if (fgValue != null) _m.record('fear_greed_index', fgValue, {});
       endSpan(fgSpan);
     } catch (e) { endSpan(fgSpan, e); _log.warn('fear-greed poll failed:', e.message); }
   }
