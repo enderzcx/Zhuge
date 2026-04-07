@@ -38,7 +38,7 @@ const DIRECTIVE_TEMPLATE = `# Owner Directives
 ## Strategy Direction
 `;
 
-export function createMemoryTools({ log }) {
+export function createMemoryTools({ log, db }) {
   const _log = log || { info() {}, warn() {}, error() {} };
 
   ensureMemoryLayout(MEMORY_DIR);
@@ -223,6 +223,10 @@ export function createMemoryTools({ log }) {
             ? `${readFileSync(path, 'utf-8').trimEnd()}\n${String(content).trim()}\n`
             : String(content);
         atomicWrite(path, nextContent);
+        // Backup critical files to SQLite (survives file deletion/corruption)
+        if (db?.backupMemory && (file === 'owner_directives.md' || file === 'context.md')) {
+          db.backupMemory(file, nextContent);
+        }
         _log.info('memory_saved', {
           module: 'memory',
           file,
@@ -275,6 +279,10 @@ export function createMemoryTools({ log }) {
           atomicWrite(path, updated);
         }
 
+        // Backup to SQLite
+        if (db?.backupMemory) {
+          try { db.backupMemory('owner_directives.md', readFileSync(path, 'utf-8')); } catch {}
+        }
         _log.info('directive_added', {
           module: 'memory',
           directive,

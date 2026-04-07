@@ -1,4 +1,5 @@
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -8,8 +9,17 @@ import {
   writeFileSync,
 } from 'fs';
 
-/** Atomic write: write to .tmp then rename. Prevents half-written files on crash. */
+/** Atomic write with backup: backs up existing file before overwrite. Prevents data loss on crash/restart. */
 export function atomicWrite(filePath, content) {
+  // Backup existing file (rotate: keep .bak and .bak2)
+  try {
+    if (existsSync(filePath)) {
+      const bak = filePath + '.bak';
+      const bak2 = filePath + '.bak2';
+      try { if (existsSync(bak)) renameSync(bak, bak2); } catch {}
+      try { copyFileSync(filePath, bak); } catch {}
+    }
+  } catch {} // backup failure should never block write
   const tmp = filePath + '.tmp';
   writeFileSync(tmp, content, 'utf-8');
   renameSync(tmp, filePath);

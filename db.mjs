@@ -347,6 +347,13 @@ export function createDB({ log } = {}) {
     CREATE INDEX IF NOT EXISTS idx_intel_score ON intel_items(score);
     CREATE INDEX IF NOT EXISTS idx_intel_created ON intel_items(created_at);
 
+    -- Memory backup: critical memory files backed up to SQLite
+    CREATE TABLE IF NOT EXISTS memory_backup (
+      key TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
     -- Dream runs: memory consolidation history
     CREATE TABLE IF NOT EXISTS dream_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -513,6 +520,22 @@ export function createDB({ log } = {}) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+  const upsertMemoryBackup = db.prepare(`
+    INSERT INTO memory_backup (key, content, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET content = excluded.content, updated_at = datetime('now')
+  `);
+
+  function backupMemory(key, content) {
+    try { upsertMemoryBackup.run(key, content); } catch {}
+  }
+
+  function restoreMemory(key) {
+    try {
+      const row = db.prepare('SELECT content, updated_at FROM memory_backup WHERE key = ?').get(key);
+      return row || null;
+    } catch { return null; }
+  }
+
   const insertPush = db.prepare(`
     INSERT INTO push_history (push_id, level, text, url, analysis_json, raw_news_json, reasoning, trace_id, pushed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -531,5 +554,6 @@ export function createDB({ log } = {}) {
     insertCandidate, updateCandidateResearch, markCandidateTraded,
     insertCompoundStrategy, updateCompoundStrategyStatus, updateCompoundStrategyEvidence,
     insertPush, insertIntel,
+    backupMemory, restoreMemory,
   };
 }

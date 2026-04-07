@@ -139,7 +139,7 @@ const dataTools = createDataTools({
   intelStream, config,
 });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
-const memoryTools = createMemoryTools({ log });
+const memoryTools = createMemoryTools({ log, db });
 toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS]);
 
 const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
