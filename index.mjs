@@ -200,7 +200,51 @@ app.listen(config.PORT, () => {
   // Bitget Private WebSocket: register callbacks BEFORE connect to avoid missing early events
   bitgetWS.onOrderFill((fill) => bitgetExec.handleOrderFill?.(fill));
   bitgetWS.onPositionClose((pos) => bitgetExec.handlePositionClose?.(pos));
+
+  // --- Floating loss monitor: react to drawdown in real-time ---
+  let _lastDrawdownAlert = 0;
+  bitgetWS.onPositionUpdate((positions) => {
+    if (!bitgetWS.isHealthy()) return;
+    const equity = bitgetWS.getEquity();
+    if (equity <= 0) return;
+    const totalPnL = bitgetWS.getUnrealizedPnL();
+    const lossPct = -totalPnL / equity; // positive when losing
+
+    // 5% threshold: FLASH alert (risk agent already blocks new trades at this level)
+    if (lossPct >= 0.05 && Date.now() - _lastDrawdownAlert > 5 * 60 * 1000) {
+      _lastDrawdownAlert = Date.now();
+      log.error('drawdown_critical', { module: 'index', totalPnL: totalPnL.toFixed(2), equity: equity.toFixed(2), lossPct: (lossPct * 100).toFixed(1) });
+      pushEngine?.pushError?.({ source: 'risk_monitor', message: `浮亏 ${totalPnL.toFixed(2)} USDT (${(lossPct * 100).toFixed(1)}% 权益)，已触发紧急分析` });
+      pipeline.collectAndAnalyze().catch(e => log.error('emergency_analysis_error', { module: 'index', error: e.message }));
+    }
+    // 3% threshold: trigger instant analysis cycle
+    else if (lossPct >= 0.03 && Date.now() - _lastDrawdownAlert > 5 * 60 * 1000) {
+      _lastDrawdownAlert = Date.now();
+      log.warn('drawdown_warning', { module: 'index', totalPnL: totalPnL.toFixed(2), equity: equity.toFixed(2), lossPct: (lossPct * 100).toFixed(1) });
+      pipeline.collectAndAnalyze().catch(e => log.error('drawdown_analysis_error', { module: 'index', error: e.message }));
+    }
+  });
+
   bitgetWS.connect();
+
+  // --- News flash trigger: react to high-impact news between analysis cycles ---
+  const { fetchNews } = dataSources;
+  setInterval(async () => {
+    // Skip if last analysis was < 10 min ago
+    const lastAnalysis = cache.crypto.lastUpdate ? new Date(cache.crypto.lastUpdate).getTime() : 0;
+    if (Date.now() - lastAnalysis < 10 * 60 * 1000) return;
+    // Skip if currently analyzing
+    if (cache.crypto.analyzing) return;
+    try {
+      const news = await fetchNews(5);
+      const flashNews = news.find(n => (n.score || n.aiRating?.score || 0) >= 80 && (n.signal || n.aiRating?.signal) !== 'neutral');
+      if (flashNews) {
+        log.info('news_flash_trigger', { module: 'index', title: (flashNews.title || '').slice(0, 80), score: flashNews.score || flashNews.aiRating?.score });
+        pipeline.collectAndAnalyze().catch(e => log.error('news_analysis_error', { module: 'index', error: e.message }));
+      }
+    } catch (e) { /* news fetch fail is not critical */ }
+  }, 5 * 60 * 1000);
+
   // Adaptive REST fallback sync: 5min when WS unhealthy, 30min when healthy
   function scheduleTradeSync() {
     const interval = bitgetWS.isHealthy() ? 30 * 60 * 1000 : 5 * 60 * 1000;
