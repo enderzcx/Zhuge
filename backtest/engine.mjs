@@ -75,6 +75,9 @@ export function runBacktest({ db, symbol, timeframe, strategyId, startTs, endTs,
       usdtVolume: current.volume || 0,
     });
 
+    // Capture position state BEFORE TP/SL checks (for same-candle re-entry guard)
+    const hadPositionBeforeTPSL = sim.positions.length > 0;
+
     // Check TP/SL — order matters: check adverse price first to avoid optimistic bias
     // Long: check low (SL) before high (TP). Short: check high (SL) before low (TP).
     const openSide = sim.positions[0]?.side;
@@ -86,7 +89,7 @@ export function runBacktest({ db, symbol, timeframe, strategyId, startTs, endTs,
       sim.checkPositions(current.low, current.ts);
     }
 
-    const hadPosition = sim.positions.length > 0;
+    const hadPosition = hadPositionBeforeTPSL;
 
     // Exit check (only if we have an open position)
     if (hadPosition && exitConditions.length > 0) {

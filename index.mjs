@@ -7,6 +7,7 @@ import { createConfig } from './config.mjs';
 import { createDB } from './db.mjs';
 import { createLLM } from './llm.mjs';
 import { createBitgetClient } from './bitget/client.mjs';
+import { createBitgetWS } from './bitget/ws.mjs';
 import { createBitgetExecutor } from './bitget/executor.mjs';
 import { registerBitgetRoutes } from './bitget/routes.mjs';
 import { createMessageBus } from './agents/message-bus.mjs';
@@ -74,6 +75,7 @@ const health = createHealthMonitor(metrics, { log, alertFn: (msg) => _alertRef.f
 health.start();
 const llm = createLLM(config);
 const bitgetClient = createBitgetClient(config, { metrics, log });
+const bitgetWS = createBitgetWS(config, { log, metrics });
 const messageBus = createMessageBus({ db });
 const agentRunner = createAgentRunner({ config, db, messageBus, metrics, log });
 const dataSources = createDataSources(config);
@@ -83,7 +85,7 @@ const lifi = createLiFi(config);
 const _ragRef = { instance: null };
 const _researcherRef = { instance: null };
 const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics, researcher: { researchCoin: (...a) => _researcherRef.instance?.researchCoin(...a) } });
-const riskAgent = createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus, log });
+const riskAgent = createRiskAgent({ db, config, bitgetClient, bitgetWS, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
   stock:  { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
@@ -92,7 +94,7 @@ const strategist = createStrategist({ db, agentRunner, messageBus, cache, log, c
 const telegram = createTelegram({ db, config, agentMetrics: agentRunner.agentMetrics, cache });
 const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram, log });
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
-const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer, log, metrics });
+const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messageBus, reviewer, log, metrics });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources, log });
 _researcherRef.instance = researcher;
 const _compoundRef = { instance: null };
@@ -195,11 +197,20 @@ app.listen(config.PORT, () => {
     scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
   }
   runAnalysisLoop();
-  // Check for filled/closed positions every 5 minutes + review pending orders
-  setInterval(() => {
-    bitgetExec.checkAndSyncTrades().catch(e => log.error('trade_sync_error', { module: 'index', error: e.message }));
-    scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
-  }, 5 * 60 * 1000);
+  // Bitget Private WebSocket: register callbacks BEFORE connect to avoid missing early events
+  bitgetWS.onOrderFill((fill) => bitgetExec.handleOrderFill?.(fill));
+  bitgetWS.onPositionClose((pos) => bitgetExec.handlePositionClose?.(pos));
+  bitgetWS.connect();
+  // Adaptive REST fallback sync: 5min when WS unhealthy, 30min when healthy
+  function scheduleTradeSync() {
+    const interval = bitgetWS.isHealthy() ? 30 * 60 * 1000 : 5 * 60 * 1000;
+    setTimeout(() => {
+      bitgetExec.checkAndSyncTrades().catch(e => log.error('trade_sync_error', { module: 'index', error: e.message }));
+      scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
+      scheduleTradeSync();
+    }, interval);
+  }
+  scheduleTradeSync();
   priceStream.connectOKXWebSocket();
 
   // Start TG bot

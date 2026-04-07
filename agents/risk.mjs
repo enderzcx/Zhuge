@@ -2,9 +2,10 @@
  * Risk agent: hard rules + LLM-based soft evaluation.
  */
 
-export function createRiskAgent({ db, config, bitgetClient, agentRunner, messageBus, log }) {
+export function createRiskAgent({ db, config, bitgetClient, bitgetWS, agentRunner, messageBus, log }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { bitgetRequest } = bitgetClient;
+  const _ws = bitgetWS || { isHealthy: () => false, getEquity: () => 0, getUnrealizedPnL: () => 0 };
   const { runAgent } = agentRunner;
   const { postMessage } = messageBus;
   const { insertDecision } = db;
@@ -27,12 +28,7 @@ Your workflow:
 1. Call get_trade_stats to check recent performance
 2. Call get_recent_decisions to see what happened recently
 3. Evaluate the signal against rules
-4. Respond with ONLY this JSON:
-{
-  "verdict": "PASS" | "VETO",
-  "reason": "<one-line Chinese explanation>",
-  "risk_flags": ["<any warnings even if PASS>"]
-}`;
+4. Call submit_verdict with your decision. Do NOT output raw JSON text.`;
 
   const RISK_TOOLS = [
     {
@@ -51,9 +47,26 @@ Your workflow:
         parameters: { type: 'object', properties: {}, required: [] },
       },
     },
+    {
+      type: 'function',
+      function: {
+        name: 'submit_verdict',
+        description: 'Submit your final PASS or VETO decision. You MUST call this tool as your last step.',
+        parameters: {
+          type: 'object',
+          properties: {
+            verdict: { type: 'string', enum: ['PASS', 'VETO'] },
+            reason: { type: 'string', description: 'One-line Chinese explanation' },
+            risk_flags: { type: 'array', items: { type: 'string' }, description: 'Warning flags even if PASS' },
+          },
+          required: ['verdict', 'reason'],
+        },
+      },
+    },
   ];
 
   const RISK_EXECUTORS = {
+    submit_verdict: async (args) => JSON.stringify({ status: 'submitted' }),
     get_trade_stats: async () => {
       // Filter out pnl=0 trades (unfilled limit orders) for accurate stats
       const closed = db.prepare("SELECT * FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 20").all();
@@ -140,19 +153,33 @@ Your workflow:
     const recent24h = db.prepare('SELECT pnl FROM trades WHERE status = ? AND closed_at > ?').all('closed', h24);
     let loss24h = recent24h.reduce((s, t) => s + Math.min(0, t.pnl || 0), 0);
     // Include unrealized PnL from open positions (floating losses count)
-    try {
-      const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
-      const positions = Array.isArray(posData) ? posData : (posData?.list || []);
-      const unrealizedLoss = positions.reduce((s, p) => s + Math.min(0, parseFloat(p.unrealizedPL || '0')), 0);
-      loss24h += unrealizedLoss;
-    } catch (e) { _log.warn('unrealized_pnl_fetch_failed', { module: 'risk', error: e.message }); }
-    // Dynamic threshold: 5% of account equity (fetch from Bitget)
-    let lossThreshold = 50; // fallback
-    try {
-      const accts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES').catch(() => []);
-      const equity = parseFloat((accts || []).find(a => a.marginCoin === 'USDT')?.accountEquity || '0');
-      if (equity > 0) lossThreshold = equity * 0.05;
-    } catch (e) { _log.warn('equity_fetch_failed', { module: 'risk', error: e.message, fallback_threshold: 50 }); }
+    // Primary: WS cache (instant, no API call). Fallback: REST API.
+    let unrealizedLoss = 0;
+    if (_ws.isHealthy()) {
+      unrealizedLoss = Math.min(0, _ws.getUnrealizedPnL());
+    } else {
+      try {
+        const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+        const positions = Array.isArray(posData) ? posData : (posData?.list || []);
+        unrealizedLoss = positions.reduce((s, p) => s + Math.min(0, parseFloat(p.unrealizedPL || '0')), 0);
+      } catch (e) { _log.warn('unrealized_pnl_fetch_failed', { module: 'risk', error: e.message }); }
+    }
+    loss24h += unrealizedLoss;
+
+    // Dynamic threshold: 5% of account equity
+    // Primary: WS cache. Fallback: REST API.
+    let equity = _ws.isHealthy() ? _ws.getEquity() : 0;
+    if (equity <= 0) {
+      try {
+        const accts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES').catch(() => []);
+        equity = parseFloat((accts || []).find(a => a.marginCoin === 'USDT')?.accountEquity || '0');
+      } catch (e) { _log.warn('equity_fetch_failed', { module: 'risk', error: e.message }); }
+    }
+    const lossThreshold = equity > 0 ? equity * 0.05 : 0;
+    if (lossThreshold <= 0) {
+      _log.warn('equity_unknown_veto', { module: 'risk' });
+      return { pass: false, reason: '无法获取账户权益，暂停交易', risk_flags: ['equity_unknown'] };
+    }
     if (loss24h < -lossThreshold) {
       const reason = `24小时累计亏损 ${loss24h.toFixed(2)} USDC (含浮亏)，超过安全阈值 (${lossThreshold.toFixed(2)})`;
       postMessage('risk', 'executor', 'VETO', { reason }, traceId);
@@ -166,14 +193,26 @@ Your workflow:
         { trace_id: traceId, max_tokens: 400, timeout: 20000 }
       );
 
+      // Extract verdict from submit_verdict tool call (structured, preferred)
       let verdict;
-      try {
-        const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        verdict = JSON.parse(jsonStr);
-      } catch {
-        // If can't parse, default to PASS with warning
-        _log.warn('verdict_parse_failed', { module: 'risk', raw: result.content.slice(0, 100) });
-        verdict = { verdict: 'VETO', reason: 'Risk agent parse error, defaulting VETO', risk_flags: ['parse_error'] };
+      const submitCall = result.toolCalls.find(t => t.name === 'submit_verdict');
+      if (submitCall) {
+        const args = typeof submitCall.args === 'string' ? JSON.parse(submitCall.args) : submitCall.args;
+        if (args?.verdict && args?.reason) {
+          verdict = args;
+        } else {
+          _log.warn('submit_verdict_incomplete', { module: 'risk', keys: Object.keys(args || {}) });
+        }
+      }
+      if (!verdict) {
+        // Fallback: legacy free-form text parsing
+        try {
+          const jsonStr = result.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          verdict = JSON.parse(jsonStr);
+        } catch {
+          _log.warn('verdict_parse_failed', { module: 'risk', raw: result.content.slice(0, 100) });
+          verdict = { verdict: 'VETO', reason: 'Risk agent parse error, defaulting VETO', risk_flags: ['parse_error'] };
+        }
       }
 
       const pass = verdict.verdict === 'PASS';

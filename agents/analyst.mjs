@@ -142,7 +142,7 @@ Rules:
 - push_worthy: true when confidence >= 55 AND recommended_action is NOT hold (be proactive! We use graduated position sizing now — small scout positions at lower confidence, scaling up as confidence grows)
 - The system now uses 4-level position scaling (1:1:2:4). Lower confidence = smaller position. Don't hold back on directional signals just because confidence isn't extremely high.
 - Be precise with numbers
-- Output ONLY the JSON after gathering data, no other text.${lessonsBlock}${performanceBlock}`;
+- After gathering data, call the submit_analysis tool with your complete analysis. Do NOT output raw JSON text.${lessonsBlock}${performanceBlock}`;
   }
 
   const ANALYST_TOOLS = [
@@ -240,9 +240,41 @@ Rules:
         },
       },
     },
+    {
+      type: 'function',
+      function: {
+        name: 'submit_analysis',
+        description: 'Submit your final analysis. You MUST call this tool with your complete analysis as the last step. Do NOT output raw JSON text — always use this tool.',
+        parameters: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', enum: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'] },
+            symbol_reason: { type: 'string', description: 'One-line Chinese: why this asset' },
+            macro_risk_score: { type: 'number', description: '0-100, higher = more risk' },
+            crypto_sentiment: { type: 'number', description: '0-100, higher = more bullish' },
+            stock_sentiment: { type: 'number', description: '0-100, higher = more bullish (stock mode only)' },
+            technical_bias: { type: 'string', enum: ['long', 'short', 'neutral'] },
+            recommended_action: { type: 'string', enum: ['strong_buy', 'increase_exposure', 'hold', 'reduce_exposure', 'strong_sell'] },
+            confidence: { type: 'number', description: '0-100' },
+            entry_zone: { type: 'object', properties: { low: { type: 'number' }, high: { type: 'number' } } },
+            stop_loss: { type: 'number' },
+            take_profit: { type: 'number' },
+            alerts: { type: 'array', items: { type: 'object', properties: { level: { type: 'string' }, signal: { type: 'string' }, source: { type: 'string' }, relevance: { type: 'number' } } } },
+            briefing: { type: 'string', description: '3-4 sentence Chinese briefing' },
+            push_worthy: { type: 'boolean' },
+            push_reason: { type: 'string' },
+            key_levels: { type: 'object', properties: { support: { type: 'number' }, resistance: { type: 'number' }, fib_031: { type: 'number' } } },
+            next_check_in: { type: 'number', description: 'Minutes until next analysis cycle' },
+          },
+          required: ['symbol', 'recommended_action', 'confidence', 'briefing', 'alerts'],
+        },
+      },
+    },
   ];
 
   const ANALYST_EXECUTORS = {
+    // submit_analysis is handled by pipeline — just echo back the args
+    submit_analysis: async (args) => JSON.stringify({ status: 'submitted' }),
     get_crucix_data: async () => {
       const data = await fetchCrucix();
       return data ? JSON.stringify(compactCrucixObj(data)) : JSON.stringify({ error: 'Crucix unavailable' });

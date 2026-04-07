@@ -2,9 +2,10 @@
  * Bitget trade executor: mutex lock + order placement + trade sync.
  */
 
-export function createBitgetExecutor({ db, config, bitgetClient, messageBus, reviewer, log, metrics }) {
+export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messageBus, reviewer, log, metrics }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { bitgetRequest, roundPrice } = bitgetClient;
+  const _ws = bitgetWS || { isHealthy: () => false, getEquity: () => 0, getAvailable: () => 0 };
   const { postMessage } = messageBus;
   const { insertTrade, insertDecision, updateTradeClose,
           insertPositionGroup, insertPositionLevel, updatePositionGroup, closePositionGroup,
@@ -248,6 +249,12 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', orderParams);
 
       const orderId = order?.orderId;
+      if (!orderId) {
+        _log.error('order_no_id', { module: 'bitget_exec', response: JSON.stringify(order).slice(0, 200) });
+        insertDecision.run(new Date().toISOString(), 'executor', 'bitget_error', '', '',
+          JSON.stringify({ error: 'no orderId in response', order }), 'Order placed but no ID returned', '', '', confidence, null);
+        return;
+      }
       const priceInfo = useLimit ? `@ ${orderParams.price}` : '@ market';
       _log.info('trade_opened', { module: 'bitget_exec', holdSide, size, symbol, leverage, orderType, priceInfo, confidence, sl: signal.stop_loss || '-', tp: signal.take_profit || '-', orderId });
       metrics?.record('trade_execution', 1, { symbol, side, orderType });
@@ -270,11 +277,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       postMessage('executor', 'reviewer', 'TRADE_RESULT', { source: 'bitget', orderId, symbol, side, size, orderType }, traceId);
 
-      // Fetch actual fill price (market: 3s, limit: 60s to allow fill time)
-      if (orderId) {
-        const delay = orderType === 'market' ? 3000 : 60000;
-        setTimeout(() => _fetchAndUpdateEntryPrice(orderId, symbol, `bg_${orderId}`), delay);
-      }
+      // Fill price correction handled by WS handleOrderFill callback.
+      // REST fallback in checkAndSyncTrades covers WS downtime.
 
     } catch (err) {
       _log.error('trade_failed', { module: 'bitget_exec', error: err.message });
@@ -299,7 +303,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
   async function checkAndSyncTrades() {
     if (!config.BITGET_API_KEY) return;
     try {
-      const openTrades = db.prepare("SELECT * FROM trades WHERE status = 'open' AND source = 'bitget'").all();
+      const openTrades = db.prepare("SELECT * FROM trades WHERE status IN ('open', 'closing') AND source = 'bitget'").all();
       if (!openTrades.length) return;
 
       const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
@@ -354,6 +358,28 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
               const candleRow = db.prepare('SELECT close FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT 1').get(trade.pair);
               if (candleRow?.close) exitPrice = parseFloat(candleRow.close);
             } catch (e) { _log.warn('candle_fallback_failed', { module: 'trade_sync', error: e.message }); }
+          }
+
+          // CRITICAL: if exit price is still unknown, mark 'closing' and retry on next sync cycle
+          if (exitPrice === 0) {
+            if (trade.status !== 'closing') {
+              // First detection — transition to 'closing', retry next cycle (5 min)
+              _log.warn('exit_price_unknown_retry', { module: 'trade_sync', tradeId: trade.trade_id, pair: trade.pair });
+              db.prepare("UPDATE trades SET status = 'closing' WHERE trade_id = ?").run(trade.trade_id);
+              continue;
+            }
+            // Already 'closing' — been at least one retry cycle. Check if stuck too long (>15 min)
+            const openedMs = new Date(trade.opened_at).getTime();
+            const stuckTooLong = Date.now() - openedMs > 24 * 60 * 60 * 1000; // >24h = definitely stale
+            if (!stuckTooLong) {
+              _log.warn('exit_price_still_unknown', { module: 'trade_sync', tradeId: trade.trade_id });
+              continue; // keep retrying
+            }
+            // Gave up — force-close with null PnL and alert
+            _log.error('exit_price_unknown_final', { module: 'trade_sync', tradeId: trade.trade_id, pair: trade.pair });
+            postMessage('executor', 'risk', 'ALERT', { type: 'unknown_exit_price', tradeId: trade.trade_id, pair: trade.pair }, null);
+            updateTradeClose.run(0, null, null, new Date().toISOString(), trade.trade_id);
+            continue;
           }
 
           let entryPrice = trade.entry_price || 0;
@@ -525,22 +551,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
 
       postMessage('executor', 'reviewer', 'TRADE_RESULT', { source: 'bitget', orderId, symbol, side, size: sizeStr, level: 0 }, traceId);
 
-      // Fetch fill price
-      if (orderId) {
-        setTimeout(async () => {
-          await _fetchAndUpdateEntryPrice(orderId, symbol, tradeId);
-          // Also update position group avg_entry
-          try {
-            const detail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${symbol}&productType=USDT-FUTURES&orderId=${orderId}`);
-            const fillPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
-            if (fillPrice > 0) {
-              const newSL = _calcStopLoss(holdSide, fillPrice, 0);
-              updatePositionGroup.run(0, fillPrice, scoutSize, newSL, tp, groupId);
-              db.prepare('UPDATE position_levels SET entry_price = ? WHERE group_id = ? AND level = 0').run(fillPrice, groupId);
-            }
-          } catch (e) { _log.warn('scout_fill_update_failed', { module: 'scout', error: e.message }); }
-        }, 3000);
-      }
+      // Fill price correction now handled by WS handleOrderFill callback.
+      // REST fallback in checkAndSyncTrades covers WS downtime.
 
       return { groupId, level: 0, size: scoutSize, symbol, holdSide };
     } catch (err) {
@@ -610,12 +622,21 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
       const orderId = order?.orderId;
       const currentPrice = _getSymbolPrice(group.symbol);
 
+      // Validate price before updating weighted average
+      if (!currentPrice || currentPrice <= 0) {
+        _log.error('scale_up_invalid_price', { module: 'scale_up', symbol: group.symbol, currentPrice });
+        // Order already placed — record but don't update group avg with bad price
+        // Fill price correction in setTimeout below will fix it
+      }
+
       // Update weighted average entry
-      const newAvgEntry = _calcWeightedAvgEntry(group.avg_entry_price, group.total_size, currentPrice, size);
+      const safePrice = currentPrice > 0 ? currentPrice : group.avg_entry_price; // use existing avg as placeholder
+      const newAvgEntry = _calcWeightedAvgEntry(group.avg_entry_price, group.total_size, safePrice, size);
       const newTotalSize = group.total_size + size;
       const newSL = _calcStopLoss(holdSide, newAvgEntry, nextLevel);
       const tp = group.take_profit; // keep existing TP
 
+      const leverage = String(SCALING?.leverage || config.MOMENTUM?.leverage || 10);
       _log.info('scale_up_opened', { module: 'scale_up', level: nextLevel, holdSide, size: sizeStr, symbol: group.symbol, totalSize: newTotalSize.toFixed(4), avgEntry: newAvgEntry.toFixed(2), stopLoss: newSL });
       metrics?.record('trade_execution', 1, { symbol: group.symbol, side, orderType: 'market' });
 
@@ -639,22 +660,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
         source: 'bitget', orderId, symbol: group.symbol, side, size: sizeStr, level: nextLevel
       }, traceId);
 
-      // Fetch fill price and update avg
-      if (orderId) {
-        setTimeout(async () => {
-          await _fetchAndUpdateEntryPrice(orderId, group.symbol, tradeId);
-          try {
-            const detail = await bitgetRequest('GET', `/api/v2/mix/order/detail?symbol=${group.symbol}&productType=USDT-FUTURES&orderId=${orderId}`);
-            const fillPrice = parseFloat(detail?.priceAvg || detail?.fillPrice || '0');
-            if (fillPrice > 0) {
-              const correctedAvg = _calcWeightedAvgEntry(group.avg_entry_price, group.total_size, fillPrice, size);
-              const correctedSL = _calcStopLoss(holdSide, correctedAvg, nextLevel);
-              updatePositionGroup.run(nextLevel, correctedAvg, newTotalSize, correctedSL, tp, group.id);
-              db.prepare('UPDATE position_levels SET entry_price = ? WHERE group_id = ? AND level = ?').run(fillPrice, group.id, nextLevel);
-            }
-          } catch (e) { _log.warn('scaleup_fill_update_failed', { module: 'scale_up', error: e.message }); }
-        }, 3000);
-      }
+      // Fill price correction now handled by WS handleOrderFill callback.
 
       return { level: nextLevel, size, avgEntry: newAvgEntry };
     } catch (err) {
@@ -745,12 +751,123 @@ export function createBitgetExecutor({ db, config, bitgetClient, messageBus, rev
     }
   }
 
+  // --- WebSocket event handlers (real-time, replaces setTimeout hacks) ---
+
+  /**
+   * Handle order fill from Bitget Private WS.
+   * Replaces the setTimeout(_fetchAndUpdateEntryPrice, 3000) hack.
+   */
+  function handleOrderFill(fill) {
+    if (!fill.orderId || fill.fillPrice <= 0) return;
+
+    const tradeId = `bg_${fill.orderId}`;
+
+    // Update entry price for open orders
+    if (fill.tradeSide === 'open') {
+      try {
+        // Match by trade_id (derived from orderId) — overwrite any provisional price
+        db.prepare('UPDATE trades SET entry_price = ? WHERE trade_id = ?').run(fill.fillPrice, tradeId);
+        _log.info('ws_entry_price_set', { module: 'ws_handler', tradeId, fillPrice: fill.fillPrice });
+
+        // Update position group avg_entry if scaling
+        if (SCALING?.enabled) {
+          const level = db.prepare('SELECT group_id, level, size FROM position_levels WHERE order_id = ?').get(fill.orderId);
+          if (level) {
+            const group = db.prepare('SELECT * FROM position_groups WHERE id = ?').get(level.group_id);
+            if (group) {
+              const correctedAvg = _calcWeightedAvgEntry(
+                group.avg_entry_price, group.total_size - level.size, fill.fillPrice, level.size
+              );
+              const correctedSL = _calcStopLoss(group.side, correctedAvg, group.current_level);
+              updatePositionGroup.run(group.current_level, correctedAvg, group.total_size, correctedSL, group.take_profit, group.id);
+              db.prepare('UPDATE position_levels SET entry_price = ? WHERE group_id = ? AND level = ?').run(fill.fillPrice, level.group_id, level.level);
+              _log.info('ws_group_avg_updated', { module: 'ws_handler', groupId: level.group_id, correctedAvg: correctedAvg.toFixed(2) });
+            }
+          }
+        }
+      } catch (e) {
+        _log.warn('ws_fill_update_error', { module: 'ws_handler', error: e.message });
+      }
+    }
+
+    // Update exit price for close orders
+    if (fill.tradeSide === 'close') {
+      try {
+        // Find ALL matching open trades by symbol + opposite side (scaling = multiple legs)
+        const holdSide = fill.side === 'buy' ? 'short' : 'long';
+        const openSide = fill.side === 'buy' ? 'sell' : 'buy';
+        const openTrades = db.prepare(
+          "SELECT * FROM trades WHERE status IN ('open', 'closing') AND source = 'bitget' AND pair = ? AND side = ? ORDER BY opened_at DESC"
+        ).all(fill.symbol, openSide);
+
+        for (const openTrade of openTrades) {
+          if (openTrade.entry_price <= 0) continue;
+          const direction = openTrade.side === 'buy' ? 1 : -1;
+          const lev = openTrade.leverage || 10;
+          const pnl = direction * (fill.fillPrice - openTrade.entry_price) * openTrade.amount;
+          const pnlPct = direction * (fill.fillPrice - openTrade.entry_price) / openTrade.entry_price * lev * 100;
+
+          updateTradeClose.run(fill.fillPrice, pnl, pnlPct, new Date().toISOString(), openTrade.trade_id);
+          _log.info('ws_trade_closed', { module: 'ws_handler', tradeId: openTrade.trade_id, exitPrice: fill.fillPrice, pnl: pnl.toFixed(4) });
+        }
+
+        // Close position_group if scaling enabled
+        if (SCALING?.enabled) {
+          const group = getActiveGroup(fill.symbol);
+          if (group && group.side === holdSide) {
+            const groupPnl = openTrades.reduce((s, t) => {
+              if (t.entry_price <= 0) return s;
+              const dir = t.side === 'buy' ? 1 : -1;
+              return s + dir * (fill.fillPrice - t.entry_price) * t.amount;
+            }, 0);
+            const groupPnlPct = group.avg_entry_price > 0
+              ? ((fill.fillPrice - group.avg_entry_price) / group.avg_entry_price * (group.side === 'long' ? 1 : -1) * 100)
+              : 0;
+            closePositionGroup.run(groupPnl, groupPnlPct, new Date().toISOString(), group.id);
+            _log.info('ws_group_closed', { module: 'ws_handler', groupId: group.id, pnl: groupPnl.toFixed(4) });
+          }
+        }
+
+        // Trigger reviewer once for the batch
+        if (reviewer && openTrades.length > 0) {
+          reviewer.runReview(`ws_close_${fill.symbol}_${Date.now()}`).catch(err =>
+            _log.error('reviewer_trigger_failed', { module: 'ws_handler', error: err.message })
+          );
+        }
+      } catch (e) {
+        _log.warn('ws_close_update_error', { module: 'ws_handler', error: e.message });
+      }
+    }
+  }
+
+  /**
+   * Handle position close event from Bitget Private WS.
+   * Backup path for when order fill event doesn't arrive (TP/SL/liquidation).
+   */
+  function handlePositionClose(pos) {
+    _log.info('ws_position_close_event', { module: 'ws_handler', symbol: pos.symbol, side: pos.holdSide });
+
+    // Check if we have an open trade for this symbol/side that wasn't already closed by handleOrderFill
+    const openSide = pos.holdSide === 'long' ? 'buy' : 'sell';
+    const openTrade = db.prepare(
+      "SELECT * FROM trades WHERE status IN ('open', 'closing') AND source = 'bitget' AND pair = ? AND side = ? ORDER BY opened_at DESC LIMIT 1"
+    ).get(pos.symbol, openSide);
+
+    if (!openTrade) return; // Already handled by order fill event
+
+    // Position closed but we don't have fill price yet — mark as 'closing' for REST fallback
+    _log.warn('ws_position_close_no_fill', { module: 'ws_handler', tradeId: openTrade.trade_id });
+    db.prepare("UPDATE trades SET status = 'closing' WHERE trade_id = ?").run(openTrade.trade_id);
+  }
+
   return {
     executeBitgetTrade, tradingLock, checkAndSyncTrades,
     // Scaling API
     openScoutPosition, scaleUpPosition, abandonPosition,
     checkScaleUpConditions, checkAbandonConditions,
     getActiveGroup: (symbol) => getActiveGroup(symbol),
+    // WebSocket event handlers
+    handleOrderFill, handlePositionClose,
     // Pure math helpers (exported for unit testing)
     _test: { calculateKellySize, _calcLevelSize, _calcStopLoss, _calcWeightedAvgEntry },
   };

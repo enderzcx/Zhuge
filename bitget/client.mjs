@@ -9,12 +9,18 @@ import { context } from '@opentelemetry/api';
 export function createBitgetClient(config, { metrics, log } = {}) {
   let _consecutiveFailures = 0;
   let _lastError = null;
+  let _backoffUntil = 0; // rate-limit backoff timestamp
   function bitgetSign(ts, method, path, body = '') {
     const msg = ts + method + path + body;
     return createHmac('sha256', config.BITGET_SECRET).update(msg).digest('base64');
   }
 
   async function bitgetRequest(method, path, body = null) {
+    // Rate-limit backoff: reject immediately if still in cooldown
+    if (Date.now() < _backoffUntil) {
+      const waitSec = ((_backoffUntil - Date.now()) / 1000).toFixed(1);
+      throw new Error(`Bitget rate-limited, backoff ${waitSec}s remaining`);
+    }
     const { span } = startChildSpan(context.active(),`bitget:${path.split('?')[0]}`, { method });
     const ts = String(Date.now());
     const bodyStr = body ? JSON.stringify(body) : '';
@@ -41,6 +47,12 @@ export function createBitgetClient(config, { metrics, log } = {}) {
       metrics?.record('bitget_api_error', 1, { code: data.code, path: path.split('?')[0] });
       _consecutiveFailures++;
       _lastError = `${data.code}: ${data.msg}`;
+      // Rate limit detection — Bitget uses 429xx codes or HTTP 429
+      if (data.code === '429' || String(data.code).startsWith('429') || res.status === 429) {
+        const backoffMs = Math.min(1000 * Math.pow(2, _consecutiveFailures), 60000); // exp backoff, max 60s
+        _backoffUntil = Date.now() + backoffMs;
+        log?.warn?.('bitget_rate_limited', { backoffMs, until: new Date(_backoffUntil).toISOString() });
+      }
       if (_consecutiveFailures >= 3) {
         log?.warn?.('bitget_consecutive_failures', { count: _consecutiveFailures, lastError: _lastError });
       }

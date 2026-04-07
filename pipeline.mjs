@@ -126,15 +126,33 @@ Output ONLY the JSON, no other text.`;
         _metrics.record('llm_tokens_out', analystResult.tokensUsed.output || 0, { agent: 'analyst' });
       }
 
+      // Extract analysis from submit_analysis tool call (structured output, preferred)
+      // Falls back to free-form text parsing if LLM didn't use the tool
       let parsed;
-      try {
-        const jsonStr = analystResult.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        parsed = JSON.parse(jsonStr);
-      } catch {
-        log.error('analyst_json_parse_failed', { module: 'pipeline', mode, raw: analystResult.content.slice(0, 200) });
-        _metrics.record('error_count', 1, { module: 'pipeline', type: 'json_parse' });
-        c.analyzing = false;
-        return;
+      const submitCall = analystResult.toolCalls.find(t => t.name === 'submit_analysis');
+      if (submitCall) {
+        const args = typeof submitCall.args === 'string' ? JSON.parse(submitCall.args) : submitCall.args;
+        // Validate required fields
+        if (args?.recommended_action && args?.confidence !== undefined && args?.briefing) {
+          parsed = args;
+        } else {
+          log.warn('submit_analysis_incomplete', { module: 'pipeline', keys: Object.keys(args || {}) });
+          // Fall through to text parsing
+        }
+      }
+      if (!parsed) {
+        // Fallback: legacy free-form text parsing
+        try {
+          const jsonStr = analystResult.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          parsed = JSON.parse(jsonStr);
+          log.warn('analyst_legacy_text_output', { module: 'pipeline', mode });
+        } catch {
+          log.error('analyst_json_parse_failed', { module: 'pipeline', mode, raw: analystResult.content.slice(0, 500) });
+          _metrics.record('error_count', 1, { module: 'pipeline', type: 'json_parse' });
+          try { pushEngine?.pushError?.({ source: 'pipeline', message: `Analyst 输出解析失败 (${mode}): ${analystResult.content.slice(0, 150)}` }); } catch {}
+          c.analyzing = false;
+          return;
+        }
       }
 
       c.analysis = {
