@@ -5,7 +5,7 @@
  * Used by strategist (evaluate strategy conditions) and scanner (match momentum candidates).
  */
 
-import { calcRSI, calcBollinger } from '../../market/indicators.mjs';
+import { calcRSI, calcBollinger, calcFibonacciLevels, calcMarketStructure, calcADX, calcIchimoku, calcPivotPoints, calcMACrossover } from '../../market/indicators.mjs';
 
 /**
  * Evaluate a list of conditions against current market indicators.
@@ -100,6 +100,62 @@ export function buildIndicatorSnapshot(closes, highs, lows, ticker = {}) {
 
   // Time
   snap.hour_utc = new Date().getUTCHours();
+
+  // --- Advanced indicators (Tier 1 + 2) ---
+  // Fibonacci
+  const fib = calcFibonacciLevels(highs, lows, 50);
+  if (fib) {
+    snap.fibonacci_236 = fib.levels['0.236'];
+    snap.fibonacci_382 = fib.levels['0.382'];
+    snap.fibonacci_500 = fib.levels['0.5'];
+    snap.fibonacci_618 = fib.levels['0.618'];
+    snap.fibonacci_786 = fib.levels['0.786'];
+    snap.fibonacci_trend = fib.trend;
+  }
+  // Market structure
+  const ms = calcMarketStructure(highs, lows, closes, 5);
+  snap.market_structure_trend = ms.trend;
+  snap.higher_highs = ms.higherHighs;
+  snap.lower_lows = ms.lowerLows;
+  snap.bos_type = ms.lastBOS?.type || 'none';
+  // VWAP (needs volumes)
+  // OBV (needs volumes)
+  // ADX
+  const adx = calcADX(highs, lows, closes, 14);
+  if (adx) {
+    snap.adx = adx.adx;
+    snap.adx_trending = adx.trending;
+    snap.plus_di = adx.plusDI;
+    snap.minus_di = adx.minusDI;
+  }
+  // Ichimoku
+  const ichi = calcIchimoku(highs, lows, closes);
+  if (ichi) {
+    snap.ichimoku_cloud = ichi.cloudSignal;
+    snap.ichimoku_tenkan = ichi.tenkan;
+    snap.ichimoku_kijun = ichi.kijun;
+  }
+  // Pivots
+  if (highs.length > 0) {
+    const pvt = calcPivotPoints(highs[highs.length - 1], lows[lows.length - 1], closes[closes.length - 1]);
+    snap.pivot = pvt.pivot;
+    snap.pivot_s1 = pvt.s1;
+    snap.pivot_s2 = pvt.s2;
+    snap.pivot_r1 = pvt.r1;
+    snap.pivot_r2 = pvt.r2;
+  }
+  // MA crossovers
+  const mac = calcMACrossover(closes);
+  if (mac) {
+    snap.ema9 = mac.ema9;
+    snap.ema21 = mac.ema21;
+    snap.sma50 = mac.sma50;
+    snap.sma200 = mac.sma200;
+    snap.short_cross = mac.shortCross;
+    snap.long_cross = mac.longCross;
+  }
+  // OI fields (populated externally by pipeline when available)
+  // snap.oi_divergence, snap.oi_crowding, snap.oi_signal
 
   return snap;
 }

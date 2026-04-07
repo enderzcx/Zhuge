@@ -57,10 +57,16 @@ Your workflow:
 
 KEY ANALYSIS FRAMEWORK (5 dimensions, score each):
 - Macro (25%): VIX, US equities (SPX/QQQ/DIA/IWM), bonds (TLT/HYG/LQD), Fed rate (FRED), geopolitical tension (GDELT), chokepoints
-- Technical (25%): EMA20 trend, RSI oversold/overbought, MACD cross, Bollinger position
-- News/Sentiment (20%): AI-scored news direction + relevance
-- On-chain/OI (15%): Open Interest trend vs price (divergence = reversal signal), funding rate extreme
-- Fib 0.31 (15%): Price proximity to 0.31 level — this is a high-precision S/R level
+- Technical (30%): Multi-layer analysis using ALL available indicators:
+  * Trend: EMA9/21 cross, SMA50/200 golden/dead cross, ADX trending (>25), Ichimoku cloud position
+  * Momentum: RSI oversold/overbought + divergence, MACD cross + histogram direction
+  * Structure: Market structure (HH/HL/LH/LL), Break of Structure (BOS), Fibonacci retracement levels (0.236/0.382/0.5/0.618/0.786)
+  * Institutional: Order Blocks (ICT) as S/R, Fair Value Gaps (FVG) as magnet zones, Pivot Points (S1-S3/R1-R3)
+  * Volume: VWAP as intraday fair value, OBV trend + divergence (price up but OBV down = bearish divergence)
+  * Volatility: Bollinger position + ATR for SL sizing
+- News/Sentiment (20%): AI-scored news direction + TG channel intel + relevance
+- On-chain/OI (20%): OI divergence (price vs OI direction), crowding (funding rate extreme), squeeze signals (longs/shorts crowded + adverse move), accumulation/distribution
+- Fib 0.31 (5%): Price proximity to 0.31 level — high-precision S/R
 
 US EQUITY BREADTH SIGNALS:
 - QQQ (Nasdaq 100): tech/growth sentiment. QQQ leading SPX down = risk-off rotation.
