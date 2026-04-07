@@ -101,7 +101,7 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
                 case 'tool_start': stream.setToolStatus(resumeEvent.name, 'running'); break;
                 case 'tool_result': stream.setToolStatus(resumeEvent.name, 'done'); break;
                 case 'done':
-                  await stream.finalize(resumeEvent.content);
+                  await stream.finalize();
                   _m.record('tg_reply_latency_ms', Date.now() - replyStart);
                   break;
                 case 'error':
@@ -114,7 +114,7 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
           }
 
           case 'done':
-            await stream.finalize(event.content);
+            await stream.finalize();
             _m.record('tg_reply_latency_ms', Date.now() - replyStart);
             endSpan(msgSpan);
             break;
