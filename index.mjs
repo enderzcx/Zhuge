@@ -134,6 +134,7 @@ const dataTools = createDataTools({
   dataSources, priceStream, db: db.db, scanner,
   pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
   compound: agentCompound, readLogs, rag,
+  intelStream, config,
 });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log });

@@ -8,6 +8,7 @@ export function createConfig() {
   const LLM_MODEL = process.env.LLM_MODEL || 'gpt-5.4-mini';
   const LLM_KEY = process.env.LLM_API_KEY || '';
   const NEWS_TOKEN = process.env.OPENNEWS_TOKEN;
+  const TWITTER_TOKEN = process.env.TWITTER_TOKEN || '';
   const NEWS_API = 'https://ai.6551.io';
   const AUTO_TRADE_URL = process.env.AUTO_TRADE_URL || '';
   if (!process.env.AUTO_TRADE_SECRET) console.warn('[Config] WARNING: AUTO_TRADE_SECRET not set in .env');
@@ -157,7 +158,7 @@ export function createConfig() {
   };
 
   return {
-    PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API,
+    PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API, TWITTER_TOKEN,
     AUTO_TRADE_URL, AUTO_TRADE_SECRET,
     BITGET_API_KEY, BITGET_SECRET, BITGET_PASS, BITGET_BASE,
     AGENT_MODELS, SCALING, MOMENTUM, INTEL,

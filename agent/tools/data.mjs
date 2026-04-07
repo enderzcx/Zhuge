@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 
-export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs, rag }) {
+export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs, rag, intelStream, config }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { priceCache } = priceStream;
 
@@ -205,7 +205,66 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       },
       requiresConfirmation: false,
     },
+    // --- Intel Stream tools ---
+    {
+      name: 'search_twitter',
+      description: 'Twitter/X 搜索: 关键词搜推文，含点赞/转发/KOL 信息。用于判断市场情绪、重大事件社交反应',
+      parameters: {
+        type: 'object',
+        properties: {
+          keywords: { type: 'string', description: '搜索关键词 (如 "BTC crash", "SEC crypto")' },
+          max_results: { type: 'number', description: '返回条数 (默认10, 最多20)' },
+        },
+        required: ['keywords'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'get_kol_tweets',
+      description: '获取指定 Twitter KOL 最新推文。常用 KOL: whale_alert, lookonchain, EmberCN, DeItaone, tier10k',
+      parameters: {
+        type: 'object',
+        properties: {
+          username: { type: 'string', description: 'Twitter 用户名 (不含@)' },
+          max_results: { type: 'number', description: '返回条数 (默认5, 最多10)' },
+        },
+        required: ['username'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'get_fear_greed',
+      description: '加密货币恐慌贪婪指数 (0=极度恐慌, 100=极度贪婪)。用于宏观情绪判断',
+      parameters: { type: 'object', properties: {}, required: [] },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'get_intel_feed',
+      description: '实时情报流: TG频道+API 合并的最新市场情报，含 impact 评分和来源。用于快速了解当前市场发生了什么',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: '返回条数 (默认15)' },
+        },
+      },
+      requiresConfirmation: false,
+    },
   ];
+
+  // --- OpenTwitter API helper ---
+  const TWITTER_API = 'https://ai.6551.io/open';
+  async function _twitterPost(endpoint, body) {
+    const token = config?.TWITTER_TOKEN || process.env.TWITTER_TOKEN;
+    if (!token) return { error: 'TWITTER_TOKEN not configured' };
+    const res = await fetch(`${TWITTER_API}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return { error: `Twitter API ${res.status}` };
+    return res.json();
+  }
 
   const EXECUTORS = {
     async run_backtest({ strategy_id, symbol = 'BTCUSDT', days = 30, timeframe = '1H' } = {}) {
@@ -620,6 +679,75 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       } catch (err) {
         return `Error: ${err.message}`;
       }
+    },
+
+    // --- Intel Stream tools ---
+    async search_twitter({ keywords, max_results = 10 } = {}) {
+      if (!keywords) return JSON.stringify({ error: 'keywords required' });
+      try {
+        const data = await _twitterPost('/twitter_search', {
+          keywords, maxResults: Math.min(max_results, 20), product: 'Top',
+        });
+        if (data.error) return JSON.stringify(data);
+        const tweets = (data.data || []).slice(0, 20).map(t => ({
+          user: t.userScreenName || '?',
+          followers: t.userFollowers || 0,
+          text: (t.text || '').slice(0, 200),
+          likes: t.favoriteCount || 0,
+          retweets: t.retweetCount || 0,
+          date: t.createdAt || '',
+        }));
+        return JSON.stringify({ count: tweets.length, tweets });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    async get_kol_tweets({ username, max_results = 5 } = {}) {
+      if (!username) return JSON.stringify({ error: 'username required' });
+      try {
+        const data = await _twitterPost('/twitter_user_tweets', {
+          username, maxResults: Math.min(max_results, 10),
+        });
+        if (data.error) return JSON.stringify(data);
+        const tweets = (data.data || []).slice(0, 10).map(t => ({
+          text: (t.text || '').slice(0, 200),
+          likes: t.favoriteCount || 0,
+          retweets: t.retweetCount || 0,
+          replies: t.replyCount || 0,
+          date: t.createdAt || '',
+        }));
+        return JSON.stringify({ username, count: tweets.length, tweets });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    async get_fear_greed() {
+      try {
+        const fg = intelStream?.getFearGreed?.();
+        if (fg?.value != null) return JSON.stringify(fg);
+        // Fallback: fetch directly
+        const res = await fetch('https://cryptocurrency.cv/api/market/fear-greed', { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) return JSON.stringify({ error: 'fear-greed API unavailable' });
+        const data = await res.json();
+        return JSON.stringify({
+          value: data.current?.value ?? data.fgi?.value ?? null,
+          label: data.current?.valueClassification ?? data.fgi?.classification ?? null,
+        });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+
+    async get_intel_feed({ limit = 15 } = {}) {
+      try {
+        const items = intelStream?.getRecentIntel?.(limit) || [];
+        if (items.length === 0) return JSON.stringify({ count: 0, note: 'No recent intel (TG channels quiet or pollers warming up)' });
+        return JSON.stringify({
+          count: items.length,
+          items: items.map(i => ({
+            title: (i.title || '').slice(0, 150),
+            score: i.score,
+            signal: i.signal,
+            source: i.source,
+          })),
+        });
+      } catch (err) { return JSON.stringify({ error: err.message }); }
     },
   };
 
