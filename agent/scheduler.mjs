@@ -19,7 +19,7 @@ export function createTaskScheduler({ db, pipeline, scanner, compound, log, metr
 
   // Prepared statements
   const stmtDue = _db.prepare(`SELECT * FROM scheduled_tasks WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at`);
-  const stmtUpdateRun = _db.prepare(`UPDATE scheduled_tasks SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1, last_error = NULL WHERE task_id = ?`);
+  const stmtUpdateRun = _db.prepare(`UPDATE scheduled_tasks SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1, error_count = 0, last_error = NULL WHERE task_id = ?`);
   const stmtUpdateError = _db.prepare(`UPDATE scheduled_tasks SET error_count = error_count + 1, last_error = ? WHERE task_id = ?`);
   const stmtDisable = _db.prepare(`UPDATE scheduled_tasks SET enabled = 0 WHERE task_id = ?`);
   const stmtInsertRun = _db.prepare(`INSERT INTO scheduled_task_runs (task_id, status, duration_ms, result_summary, error_message) VALUES (?, ?, ?, ?, ?)`);
@@ -103,8 +103,12 @@ export function createTaskScheduler({ db, pipeline, scanner, compound, log, metr
       stmtUpdateError.run(err.message, task.task_id);
       _log.error('scheduler_task_error', { module: 'scheduler', taskId: task.task_id, error: err.message });
 
+      // Once-type: disable on failure (prevent retry loop every 60s)
+      if (task.schedule_type === 'once') {
+        stmtDisable.run(task.task_id);
+      }
       // Disable after 5 consecutive errors
-      if ((task.error_count || 0) + 1 >= 5) {
+      else if ((task.error_count || 0) + 1 >= 5) {
         stmtDisable.run(task.task_id);
         _log.warn('scheduler_task_disabled', { module: 'scheduler', taskId: task.task_id, reason: '5 consecutive errors' });
       }

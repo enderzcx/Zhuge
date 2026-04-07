@@ -85,8 +85,15 @@ export function createScheduleTools({ db, log, scheduler }) {
 
   const EXECUTORS = {
     async schedule_task({ name, description, schedule_type, interval_hours, daily_hour, daily_minute, action, action_params }) {
+      // Validate interval bounds (prevent Date overflow)
+      if (schedule_type === 'interval' && (!interval_hours || interval_hours < 0.1 || interval_hours > 720)) {
+        return { error: 'interval_hours must be 0.1-720 (6min to 30 days)' };
+      }
+      if (schedule_type === 'daily' && (daily_hour < 0 || daily_hour > 23)) {
+        return { error: 'daily_hour must be 0-23 (UTC)' };
+      }
       const taskId = 'task_' + randomBytes(4).toString('hex');
-      const intervalMs = schedule_type === 'interval' && interval_hours ? interval_hours * 3600000 : null;
+      const intervalMs = schedule_type === 'interval' && interval_hours ? Math.round(interval_hours * 3600000) : null;
       const nextRun = _calcFirstRun(schedule_type, interval_hours, daily_hour, daily_minute);
 
       try {
