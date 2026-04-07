@@ -329,6 +329,24 @@ export function createDB({ log } = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_bt_candles ON backtest_candles(pair, timeframe, ts);
 
+    -- Intel Stream: unified news/social/announcement items
+    CREATE TABLE IF NOT EXISTS intel_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      source TEXT,
+      link TEXT,
+      score INTEGER DEFAULT 0,
+      signal TEXT DEFAULT 'neutral',
+      coins TEXT,
+      category TEXT,
+      origin TEXT,
+      hash TEXT UNIQUE,
+      triggered INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_intel_score ON intel_items(score);
+    CREATE INDEX IF NOT EXISTS idx_intel_created ON intel_items(created_at);
+
     -- Dream runs: memory consolidation history
     CREATE TABLE IF NOT EXISTS dream_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -490,6 +508,11 @@ export function createDB({ log } = {}) {
     UPDATE compound_strategies SET evidence_json = ? WHERE strategy_id = ?
   `);
 
+  const insertIntel = db.prepare(`
+    INSERT OR IGNORE INTO intel_items (title, source, link, score, signal, coins, category, origin, hash, triggered)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
   const insertPush = db.prepare(`
     INSERT INTO push_history (push_id, level, text, url, analysis_json, raw_news_json, reasoning, trace_id, pushed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -507,6 +530,6 @@ export function createDB({ log } = {}) {
     persistNews, persistAnalysis, persistPatrol,
     insertCandidate, updateCandidateResearch, markCandidateTraded,
     insertCompoundStrategy, updateCompoundStrategyStatus, updateCompoundStrategyEvidence,
-    insertPush,
+    insertPush, insertIntel,
   };
 }

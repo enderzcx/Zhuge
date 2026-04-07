@@ -3,6 +3,11 @@
  */
 
 export function createDataSources(config) {
+  let _intel = null;
+
+  /** Wire Intel Stream instance for transparent fetchNews replacement. */
+  function setIntelStream(intel) { _intel = intel; }
+
   async function fetchCrucix() {
     try {
       const res = await fetch(`${config.CRUCIX}/api/data`, { signal: AbortSignal.timeout(10000) });
@@ -11,17 +16,24 @@ export function createDataSources(config) {
   }
 
   async function fetchNews(limit = 15) {
-    if (!config.NEWS_TOKEN) return [];
+    // Priority 1: Intel Stream cache (TG + X + APIs combined)
+    if (_intel) {
+      const cached = _intel.getRecentIntel(limit);
+      if (cached.length > 0) return cached;
+      // Cache empty (startup / polling failure) — fall through to live fetch
+    }
+
+    // Priority 2: Free daily-news API (no auth needed)
     try {
-      const res = await fetch(`${config.NEWS_API}/open/news_search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.NEWS_TOKEN}` },
-        body: JSON.stringify({ limit, min_score: 50 }),
+      const res = await fetch('https://ai.6551.io/open/free_hot?category=crypto', {
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) return [];
       const data = await res.json();
-      return data.data || data || [];
+      return (data.news?.items || []).slice(0, limit).map(n => ({
+        title: n.title || '', score: n.score || 50,
+        signal: n.signal || 'neutral', source: n.source || '6551', link: n.link || '',
+      }));
     } catch { return []; }
   }
 
@@ -133,5 +145,5 @@ export function createDataSources(config) {
     return merged.slice(0, limit * 2);
   }
 
-  return { fetchCrucix, fetchNews, fetchAllNews, compactCrucixObj, compactCrucix, compactNews };
+  return { fetchCrucix, fetchNews, fetchAllNews, compactCrucixObj, compactCrucix, compactNews, setIntelStream };
 }

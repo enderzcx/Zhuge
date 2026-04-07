@@ -22,6 +22,7 @@ import { createSignalScoring } from './market/signals.mjs';
 import { createScanner } from './market/scanner.mjs';
 import * as indicators from './market/indicators.mjs';
 import { createDataSources } from './integrations/data-sources.mjs';
+import { createIntelStream } from './integrations/intel.mjs';
 import { createLiFi, registerLiFiRoutes } from './integrations/lifi.mjs';
 import { createTelegram } from './integrations/telegram.mjs';
 import { createPipeline } from './pipeline.mjs';
@@ -79,6 +80,8 @@ const bitgetWS = createBitgetWS(config, { log, metrics });
 const messageBus = createMessageBus({ db });
 const agentRunner = createAgentRunner({ config, db, messageBus, metrics, log });
 const dataSources = createDataSources(config);
+const intelStream = createIntelStream({ config, db });
+dataSources.setIntelStream(intelStream);
 const priceStream = createPriceStream({ db, config, log, metrics });
 const signals = createSignalScoring({ db });
 const lifi = createLiFi(config);
@@ -227,23 +230,22 @@ app.listen(config.PORT, () => {
 
   bitgetWS.connect();
 
-  // --- News flash trigger: react to high-impact news between analysis cycles ---
-  const { fetchNews } = dataSources;
-  setInterval(async () => {
-    // Skip if last analysis was < 10 min ago
+  // --- Intel Stream: TG channels + Twitter/X + free APIs (replaces old news flash polling) ---
+  intelStream.setTriggerHandler((item) => {
+    // Overlap guard: skip if last analysis was < 10 min ago or currently analyzing
     const lastAnalysis = cache.crypto.lastUpdate ? new Date(cache.crypto.lastUpdate).getTime() : 0;
     if (Date.now() - lastAnalysis < 10 * 60 * 1000) return;
-    // Skip if currently analyzing
     if (cache.crypto.analyzing) return;
-    try {
-      const news = await fetchNews(5);
-      const flashNews = news.find(n => (n.score || n.aiRating?.score || 0) >= 80 && (n.signal || n.aiRating?.signal) !== 'neutral');
-      if (flashNews) {
-        log.info('news_flash_trigger', { module: 'index', title: (flashNews.title || '').slice(0, 80), score: flashNews.score || flashNews.aiRating?.score });
-        pipeline.collectAndAnalyze().catch(e => log.error('news_analysis_error', { module: 'index', error: e.message }));
-      }
-    } catch (e) { /* news fetch fail is not critical */ }
-  }, 5 * 60 * 1000);
+    log.info('intel_flash_trigger', { module: 'intel', title: (item.title || '').slice(0, 80), score: item.score, source: item.source });
+    pipeline.collectAndAnalyze().catch(e => log.error('intel_trigger_error', { module: 'intel', error: e.message }));
+  });
+  if (config.INTEL?.enabled) {
+    intelStream.start().catch(e => log.error('intel_start_error', { module: 'intel', error: e.message }));
+  } else {
+    // Fallback: start API pollers only (no TG/X, but still better than nothing)
+    intelStream.start().catch(e => log.error('intel_start_error', { module: 'intel', error: e.message }));
+    log.warn('intel_degraded_mode', { module: 'intel', reason: 'TG_API_ID not set, running API pollers only' });
+  }
 
   // Adaptive REST fallback sync: 5min when WS unhealthy, 30min when healthy
   function scheduleTradeSync() {
@@ -282,6 +284,7 @@ app.listen(config.PORT, () => {
     try {
       // Stop accepting new work
       if (agentBot?.stop) agentBot.stop();
+      intelStream.stop();
       health.stop();
       dream.stop();
       // Sync trades one last time (detect fills before exit)

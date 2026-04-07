@@ -103,6 +103,41 @@ export function createConfig() {
     symbols: ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],     // tradable symbols
   };
 
+  // --- Intel Stream: TG channels + Twitter/X + free APIs ---
+  const INTEL = {
+    enabled: !!process.env.TG_API_ID,
+    tg: {
+      apiId: parseInt(process.env.TG_API_ID || '0'),
+      apiHash: process.env.TG_API_HASH || '',
+      session: process.env.TG_SESSION || '',
+      channels: {
+        crypto: ['binancekillers', 'wallstreetqueenofficial', 'whale_alert_io',
+                 'cointelegraph', 'currentcryptonewsdaily', 'glassnode',
+                 'cryptoninjas_trading_ann', 'crypto_financial_news'],
+        energy: ['oiltrading', 'energytodayEn', 'oil_and_gas_supply_chain',
+                 'PetroGlobeEnterprises'],
+      },
+    },
+    x: {
+      enabled: !!process.env.X_AUTH_TOKEN,
+      authToken: process.env.X_AUTH_TOKEN || '',
+      kols: ['whale_alert', 'lookonchain', 'EmberCN', 'WuBlockchain',
+             'CryptoQuant_Alert', 'tier10k', 'DeItaone', 'zaborskiy_eth'],
+      keywords: ['BTC crash', 'SEC crypto', 'ETF approved', 'hack exploit',
+                 'oil surge OPEC', 'listing Binance'],
+      pollInterval: 10 * 60 * 1000,
+    },
+    apis: {
+      dailyNews: { url: 'https://ai.6551.io/open/free_hot', interval: 6 * 3600 * 1000 },
+      breaking:  { url: 'https://cryptocurrency.cv/api/breaking', interval: 3600 * 1000 },
+      fearGreed: { url: 'https://cryptocurrency.cv/api/market/fear-greed', interval: 6 * 3600 * 1000 },
+    },
+    triggerThreshold: 80,
+    cooldownMs: 5 * 60 * 1000,
+    cacheMaxItems: 500,
+    dedupMaxHashes: 5000,
+  };
+
   // --- Momentum: New Coin Research & Trading ---
   const MOMENTUM = {
     enabled: true,
@@ -121,7 +156,7 @@ export function createConfig() {
     PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API,
     AUTO_TRADE_URL, AUTO_TRADE_SECRET,
     BITGET_API_KEY, BITGET_SECRET, BITGET_PASS, BITGET_BASE,
-    AGENT_MODELS, SCALING, MOMENTUM,
+    AGENT_MODELS, SCALING, MOMENTUM, INTEL,
     LIFI_DIAMOND, SESSION_MANAGER_V2, CHAIN_MAP, CHAIN_OBJECTS, TOKEN_REGISTRY, SM_V2_ABI,
     PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
