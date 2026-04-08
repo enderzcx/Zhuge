@@ -746,6 +746,28 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
     } catch (err) {
       _log.error('abandon_failed', { module: 'abandon', error: err.message });
+      // If exchange says no position to close, the position is already gone.
+      // Clean up the DB group to stop the abandon loop from retrying every cycle.
+      // Use conditional update: only if still 'active' (avoid clobbering WS close path's real PnL).
+      if (err.message?.includes('22002') || err.message?.includes('No position')) {
+        try {
+          const changed = db.db.prepare(
+            `UPDATE position_groups SET status = 'abandoned', closed_at = datetime('now'), pnl = 0, pnl_pct = 0 WHERE id = ? AND status = 'active'`
+          ).run(group.id).changes;
+          if (changed > 0) {
+            // Also close orphaned trade rows for this group
+            const levels = getGroupLevels(group.id);
+            for (const lvl of levels) {
+              if (lvl.trade_id) {
+                try { updateTradeClose.run(0, 0, 0, new Date().toISOString(), lvl.trade_id); } catch {}
+              }
+            }
+            _log.info('abandon_ghost_group_closed', { module: 'abandon', symbol: group.symbol, groupId: group.id });
+          } else {
+            _log.info('abandon_ghost_already_closed', { module: 'abandon', symbol: group.symbol, groupId: group.id });
+          }
+        } catch (e) { _log.error('abandon_ghost_close_failed', { module: 'abandon', error: e.message }); }
+      }
     } finally {
       tradingLock.release();
     }
