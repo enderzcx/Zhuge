@@ -17,6 +17,7 @@ export function createPriceStream({ db, config, log, metrics }) {
   let wsReconnectTimer = null;
   let _pingInterval = null;
   let _anomalyHandler = null;
+  let _onCandleClose = null;
 
   // --- Price Cache ---
   const priceCache = {};
@@ -38,12 +39,16 @@ export function createPriceStream({ db, config, log, metrics }) {
     return d.toISOString();
   }
 
-  function flushCandle(pair) {
+  function flushCandle(pair, isBucketTransition = false) {
     const candle = candleBuffer[pair];
     if (!candle || !candle.open) return;
     try {
       insertCandle.run(pair, candle.open, candle.high, candle.low, candle.close, candle.ts_start);
     } catch (e) { _log.warn('candle_insert_failed', { module: 'prices', pair, error: e.message }); }
+    // Notify kline monitor on bucket transition (candle is finalized)
+    if (isBucketTransition && _onCandleClose) {
+      try { _onCandleClose(pair, { ...candle }); } catch {}
+    }
   }
 
   function updateCandle(pair, price, ts) {
@@ -51,7 +56,7 @@ export function createPriceStream({ db, config, log, metrics }) {
     const existing = candleBuffer[pair];
     if (!existing || existing.ts_start !== bucket) {
       // New bucket — flush previous candle and start fresh
-      if (existing) flushCandle(pair);
+      if (existing) flushCandle(pair, true);
       candleBuffer[pair] = { open: price, high: price, low: price, close: price, ts_start: bucket };
     } else {
       existing.high = Math.max(existing.high, price);
@@ -177,6 +182,10 @@ export function createPriceStream({ db, config, log, metrics }) {
     _anomalyHandler = fn;
   }
 
+  function setOnCandleClose(fn) {
+    _onCandleClose = fn;
+  }
+
   function getPriceData() {
     const prices = {};
     for (const pair of PRICE_PAIRS) {
@@ -191,7 +200,9 @@ export function createPriceStream({ db, config, log, metrics }) {
     connectOKXWebSocket,
     getPriceData,
     setAnomalyHandler,
+    setOnCandleClose,
     getCandleBucket,
+    get candleBuffer() { return candleBuffer; },
     get wsConnected() { return wsConnected; },
   };
 }

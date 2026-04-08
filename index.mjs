@@ -20,6 +20,7 @@ import { createResearcher } from './agents/researcher.mjs';
 import { createPriceStream } from './market/prices.mjs';
 import { createSignalScoring } from './market/signals.mjs';
 import { createScanner } from './market/scanner.mjs';
+import { createKlineMonitor } from './market/kline-monitor.mjs';
 import * as indicators from './market/indicators.mjs';
 import { createDataSources } from './integrations/data-sources.mjs';
 import { createIntelStream } from './integrations/intel.mjs';
@@ -198,6 +199,11 @@ app.get('/metrics', async (req, res) => {
   res.set('Content-Type', prom.contentType);
   res.end(await prom.metricsText());
 });
+
+// --- K-line Monitor (real-time 5m/15m/1h indicator computation + signal detection) ---
+const klineMonitor = createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics });
+priceStream.setOnCandleClose((pair, candle) => klineMonitor.onCandleClose(pair, candle));
+klineMonitor.start();
 
 // --- Anomaly handler (price spike -> instant analysis) ---
 priceStream.setAnomalyHandler((anomaly) => {

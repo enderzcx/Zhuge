@@ -137,6 +137,21 @@ export function createConfig() {
     dedupMaxHashes: 5000,
   };
 
+  // --- Real-time K-line Monitor ---
+  const KLINE_MONITOR = {
+    enabled: true,
+    snapshot_interval_ms: 60_000,        // snapshot every 60s (warnings only)
+    history_candles: 200,                 // candles loaded for indicator computation
+    signal_cooldown_ms: 60_000,          // min interval between pipeline triggers
+    alert_cooldown_ms: 300_000,          // min interval between TG warnings per pair
+    signals: {
+      ema_cross: true,                   // EMA9/21 golden/death cross
+      macd_cross: true,                  // MACD bullish/bearish cross
+      rsi_extreme: { overbought: 75, oversold: 25 },
+      bb_squeeze_threshold: 0.03,        // BBW < 3% = squeeze warning
+    },
+  };
+
   // --- Momentum: New Coin Research & Trading ---
   const MOMENTUM = {
     enabled: true,
@@ -155,7 +170,7 @@ export function createConfig() {
     PORT, CRUCIX, LLM_BASE, LLM_MODEL, LLM_KEY, NEWS_TOKEN, NEWS_API, TWITTER_TOKEN,
     AUTO_TRADE_URL, AUTO_TRADE_SECRET,
     BITGET_API_KEY, BITGET_SECRET, BITGET_PASS, BITGET_BASE,
-    AGENT_MODELS, SCALING, MOMENTUM, INTEL,
+    AGENT_MODELS, SCALING, MOMENTUM, INTEL, KLINE_MONITOR,
     LIFI_DIAMOND, SESSION_MANAGER_V2, CHAIN_MAP, CHAIN_OBJECTS, TOKEN_REGISTRY, SM_V2_ABI,
     PRICE_PAIRS, ANOMALY_THRESHOLD, FLASH_THRESHOLD, PRICE_WINDOW,
     PATROL_INTERVAL, WEEKLY_INTERVAL_MS,
