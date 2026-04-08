@@ -44,6 +44,7 @@ import { createRAG } from './agent/knowledge/rag.mjs';
 import { createTradeTools } from './agent/tools/trade.mjs';
 import { createMemoryTools } from './agent/tools/memory.mjs';
 import { createScheduleTools } from './agent/tools/schedule.mjs';
+import { createTradingViewTools } from './agent/tools/tradingview.mjs';
 import { createTaskScheduler } from './agent/scheduler.mjs';
 import { createPromptLoader } from './agent/prompts/loader.mjs';
 import { createConfirmHandler } from './agent/telegram/confirm.mjs';
@@ -147,10 +148,11 @@ const memoryTools = createMemoryTools({ log, db });
 // Scheduler created after scanner/pipeline (uses getter pattern for late-binding)
 const _schedulerRef = { instance: null };
 const scheduleTools = createScheduleTools({ db, log, scheduler: { refresh: () => _schedulerRef.instance?.refresh() } });
-toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS, ...scheduleTools.TOOL_DEFS]);
+const tvTools = createTradingViewTools();
+toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...tradeTools.TOOL_DEFS, ...memoryTools.TOOL_DEFS, ...scheduleTools.TOOL_DEFS, ...tvTools.TOOL_DEFS]);
 
 const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
-toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS, ...scheduleTools.EXECUTORS });
+toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS, ...scheduleTools.EXECUTORS, ...tvTools.EXECUTORS });
 
 const promptLoader = createPromptLoader({
   db: db.db,
