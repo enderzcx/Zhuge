@@ -307,7 +307,6 @@ export function createDB({ log } = {}) {
       superseded_by TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_cs_status ON compound_strategies(status);
-    CREATE INDEX IF NOT EXISTS idx_cs_family_version_status ON compound_strategies(family_id, version_id, status);
 
     -- Compound rules: AI-discovered trading patterns (agent/cognition/compound.mjs)
     CREATE TABLE IF NOT EXISTS compound_rules (
@@ -540,6 +539,8 @@ export function createDB({ log } = {}) {
   try { db.exec("ALTER TABLE compound_rules ADD COLUMN version_id TEXT"); } catch {}
   try { db.exec("ALTER TABLE compound_rules ADD COLUMN scope TEXT DEFAULT 'global'"); } catch {}
   try { db.exec("ALTER TABLE strategy_versions ADD COLUMN decision_mode TEXT DEFAULT 'trigger'"); } catch {}
+  // Index on migrated columns (must run after ALTER TABLE)
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_cs_family_version_status ON compound_strategies(family_id, version_id, status)"); } catch {}
 
   const insertTrade = db.prepare(`
     INSERT INTO trades (trade_id, source, pair, side, entry_price, amount, amount_out, leverage, status, tx_hash, signal_snapshot, decision_reasoning, opened_at)
