@@ -293,17 +293,7 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       const now = Date.now();
       if (now - lastSignalTime > SIGNAL_COOLDOWN) {
         lastSignalTime = now;
-
-        // Push signal alert to TG so 诸葛 and user see it immediately
-        const signalSummary = signals.map(s => {
-          const icon = s.direction === 'bullish' ? '🟢' : s.direction === 'bearish' ? '🔴' : '🟡';
-          return `${icon} ${s.detail}`;
-        }).join('\n');
-        const price = ind5m.price ? `$${ind5m.price}` : '';
-        const alertText = `📊 K线信号: ${pair} ${price}\n${signalSummary}\nRSI:${ind5m.rsi14?.toFixed(1)} EMA20:${ind5m.ema20?.toFixed(2)}`;
-        pushEngine?.pushError?.({ source: 'kline', message: alertText }).catch(() => {});
-
-        // Trigger full pipeline analysis with signal context
+        // Trigger full pipeline analysis — analyst will see the signal via kline context in prompt
         _log.info('kline_trigger_pipeline', { module: 'kline', pair, signals: signals.length });
         pipeline?.collectAndAnalyze?.().catch(e =>
           _log.error('kline_pipeline_trigger_error', { module: 'kline', error: e.message })
