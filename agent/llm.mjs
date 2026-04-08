@@ -153,6 +153,8 @@ export function createAgentLLM(config, { log, metrics } = {}) {
         yield* chatStream(messages, { ...opts, model: FALLBACK_MODEL });
         return;
       }
+      const errBody = await res.text().catch(() => '');
+      _log.error('llm_stream_error_body', { module: 'agent-llm', status: res.status, body: errBody.slice(0, 500) });
       throw new Error(`LLM stream ${res.status}`);
     }
 
