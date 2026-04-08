@@ -101,29 +101,34 @@ Your workflow:
 
   /**
    * Run Risk agent check. Returns { pass: boolean, reason: string, risk_flags: string[] }
+   * @param {object} signal
+   * @param {string} traceId
+   * @param {object} [opts] - { isScout: bool } — scout positions get relaxed rules
    */
-  async function runRiskCheck(signal, traceId) {
+  async function runRiskCheck(signal, traceId, opts = {}) {
     const now = new Date().toISOString();
+    const isScout = opts.isScout || false;
 
     // --- Hard rules (code-level, cannot be bypassed by LLM) ---
 
     // Check consecutive losses — count by position_groups if scaling enabled, else by trades
+    // Scout positions skip this check (smallest position, worth trying even after losses)
     let consecutiveLossCount = 0;
     const SCALING = config.SCALING;
-    if (SCALING?.enabled) {
-      // Count at group level: one abandoned group = one loss
-      const recentGroups = db.prepare("SELECT pnl, closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') ORDER BY closed_at DESC LIMIT 10").all();
-      for (const g of recentGroups) { if ((g.pnl || 0) < 0) consecutiveLossCount++; else break; }
-    } else {
-      // Only count actual losses (pnl < 0), skip pnl=0 (unfilled orders marked closed)
-      const recentTrades = db.prepare("SELECT pnl FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 10").all();
-      for (const t of recentTrades) { if (t.pnl < 0) consecutiveLossCount++; else break; }
+    if (!isScout) {
+      if (SCALING?.enabled) {
+        const recentGroups = db.prepare("SELECT pnl, closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') ORDER BY closed_at DESC LIMIT 10").all();
+        for (const g of recentGroups) { if ((g.pnl || 0) < 0) consecutiveLossCount++; else break; }
+      } else {
+        const recentTrades = db.prepare("SELECT pnl FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 10").all();
+        for (const t of recentTrades) { if (t.pnl < 0) consecutiveLossCount++; else break; }
+      }
     }
-    const lossThresholdCount = SCALING?.enabled ? 5 : 3; // more lenient with scaling
+    const lossThresholdCount = SCALING?.enabled ? 5 : 3;
     const consecutiveLosses = consecutiveLossCount >= lossThresholdCount;
 
-    // Check last loss time for cooldown
-    if (consecutiveLosses) {
+    // Check last loss time for cooldown (scouts skip)
+    if (consecutiveLosses && !isScout) {
       const lastLossQuery = SCALING?.enabled
         ? "SELECT closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') AND pnl < 0 ORDER BY closed_at DESC LIMIT 1"
         : "SELECT closed_at FROM trades WHERE status = 'closed' AND pnl < 0 ORDER BY closed_at DESC LIMIT 1";
@@ -187,8 +192,12 @@ Your workflow:
     }
 
     // --- Soft rules: let Risk agent LLM evaluate ---
+    // Scout positions use a relaxed prompt: lower confidence bar, ignore consecutive losses
+    const scoutOverride = isScout
+      ? `\n\nIMPORTANT: This is a SCOUT position (smallest size, minimal risk). Be LENIENT:\n- Confidence >= 50 is acceptable (not 60)\n- Ignore consecutive loss history for scouts\n- Only VETO if there's a hard red flag (24h loss limit, extreme macro risk > 90)\n- Default to PASS unless clearly dangerous`
+      : '';
     try {
-      const result = await runAgent('risk', RISK_SYSTEM_PROMPT, RISK_TOOLS, RISK_EXECUTORS,
+      const result = await runAgent('risk', RISK_SYSTEM_PROMPT + scoutOverride, RISK_TOOLS, RISK_EXECUTORS,
         `Review this trade signal and decide PASS or VETO:\n${JSON.stringify(signal, null, 2)}`,
         { trace_id: traceId, max_tokens: 400, timeout: 20000 }
       );

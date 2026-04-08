@@ -533,8 +533,8 @@ ${summary}
       const meetsConfidence = confidence >= SCALING.confidence_thresholds[0];
 
       if (isDirectional && meetsConfidence) {
-        // Risk check before opening scout
-        const riskVerdict = await runRiskCheck(signal, traceId);
+        // Risk check before opening scout (relaxed rules for smallest position)
+        const riskVerdict = await runRiskCheck(signal, traceId, { isScout: true });
         if (riskVerdict.pass) {
           const result = await openScoutPosition(symbol, signal, traceId);
           if (result) {
