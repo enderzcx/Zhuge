@@ -28,4 +28,17 @@ export function registerMarketRoutes(app, { db, priceStream }) {
     const rows = db.db.prepare('SELECT pair, open, high, low, close, ts_start FROM candles WHERE pair = ? AND ts_start > ? ORDER BY ts_start ASC').all(pair, since);
     res.json({ pair, hours, count: rows.length, candles: rows });
   });
+
+  app.get('/api/market-state', (req, res) => {
+    const symbol = (req.query.symbol || 'BTCUSDT').toUpperCase();
+    const timeframe = req.query.timeframe || '1H';
+    try {
+      const rows = db.getMarketStateRange
+        ? db.getMarketStateRange(symbol, timeframe, null, null).slice(-100)
+        : [];
+      res.json({ symbol, timeframe, data: rows, count: rows.length });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }

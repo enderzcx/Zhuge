@@ -53,6 +53,7 @@ import { createAgentBot } from './agent/telegram/bot.mjs';
 import { createProvenance } from './agent/cognition/provenance.mjs';
 import { createCompound } from './agent/cognition/compound.mjs';
 import { createDream } from './agent/cognition/dream.mjs';
+import { createStrategySelector } from './agent/cognition/strategy-selector.mjs';
 // Push Engine (Phase 3) + Dashboard (Phase 4) + Primary Market (Phase 5)
 import { createPushEngine as createSmartPush } from './agent/push/engine.mjs';
 import { createDashboard } from './agent/push/dashboard.mjs';
@@ -74,6 +75,9 @@ app.use(express.json());
 initTracing('zhuge', process.env.OTEL_ENDPOINT);
 const { log, readLogs } = createLogger();
 const db = createDB({ log });
+const strategySelector = createStrategySelector({ db: db.db, log });
+strategySelector.bootstrapWei1();
+strategySelector.bootstrapWei2();
 const metrics = createMetrics(db.db);
 const prom = createPrometheus(metrics);
 // alertFn wired after pushEngine creation below
@@ -99,7 +103,17 @@ const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
   stock:  { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
 };
-const strategist = createStrategist({ db, agentRunner, messageBus, cache, log, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {}, getActiveStrategies: () => _compoundRef.instance?.getActiveStrategies() || [] }, bitgetClient, indicators });
+const strategist = createStrategist({
+  db,
+  agentRunner,
+  messageBus,
+  cache,
+  log,
+  compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {}, getActiveStrategies: () => _compoundRef.instance?.getActiveStrategies() || [] },
+  bitgetClient,
+  indicators,
+  strategySelector,
+});
 const telegram = createTelegram({ db, config, agentMetrics: agentRunner.agentMetrics, cache });
 const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram, log });
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
@@ -107,7 +121,19 @@ const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, bitgetWS, me
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources, log });
 _researcherRef.instance = researcher;
 const _compoundRef = { instance: null };
-const scanner = createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock: bitgetExec.tradingLock, researcher, compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {} }, log, metrics });
+const scanner = createScanner({
+  db,
+  config,
+  bitgetClient,
+  agentRunner,
+  indicators,
+  tradingLock: bitgetExec.tradingLock,
+  researcher,
+  compound: { getParamOverrides: () => _compoundRef.instance?.getParamOverrides() || {} },
+  log,
+  metrics,
+  strategySelector,
+});
 // Push engine created after agentBot (needs tgSend)
 let pushEngine = null; // initialized after bot creation
 
@@ -191,7 +217,7 @@ registerAnalysisRoutes(app, { cache, agentMetrics: agentRunner.agentMetrics, pri
 registerTradeRoutes(app, { db });
 registerDecisionRoutes(app, { db });
 registerHistoryRoutes(app, { db });
-registerStrategyRoutes(app, { db });
+registerStrategyRoutes(app, { db, strategySelector, config });
 registerLearningRoutes(app, { db, signals });
 registerMarketRoutes(app, { db, priceStream });
 registerBitgetRoutes(app, { bitgetClient, log });

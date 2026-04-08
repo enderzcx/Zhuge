@@ -3,9 +3,12 @@
  * Phase 3: now uses evaluateConditions for deterministic checks + LLM for judgment.
  */
 
-import { evaluateConditions, buildIndicatorSnapshot } from '../agent/cognition/conditions.mjs';
+import { evaluateConditions } from '../agent/cognition/conditions.mjs';
+import { buildFeatureSnapshot } from '../agent/cognition/feature-builder.mjs';
+import { evaluateTargetPositionDecision } from '../agent/cognition/target-position.mjs';
+import { fetchCurrentMarketState } from '../backtest/market-state-loader.mjs';
 
-export function createStrategist({ db, agentRunner, messageBus, cache, log, compound, bitgetClient, indicators }) {
+export function createStrategist({ db, agentRunner, messageBus, cache, log, compound, bitgetClient, indicators, strategySelector }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { runAgent } = agentRunner;
   const { postMessage } = messageBus;
@@ -83,31 +86,137 @@ Respond with JSON:
     },
   ];
 
+  async function buildLiveFeatureSnapshot(symbol, timeframe) {
+    let candles = [];
+    let ticker = {};
+    try {
+      if (bitgetClient) {
+        const rows = await bitgetClient.bitgetPublic(
+          `/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=${timeframe}&limit=220`
+        );
+        candles = (rows || []).map((k) => ({
+          ts: parseInt(k[0], 10),
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+          volume: parseFloat(k[5] || 0),
+        })).reverse();
+      }
+    } catch (e) {
+      _log.warn('strategist_candle_fetch_failed', { module: 'strategist', symbol, error: e.message });
+    }
+
+    try {
+      if (bitgetClient) {
+        const tickers = await bitgetClient.bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
+        ticker = tickers?.find((t) => t.symbol === symbol) || {};
+      }
+    } catch (e) {
+      _log.warn('strategist_ticker_fetch_failed', { module: 'strategist', symbol, error: e.message });
+    }
+
+    let currentState = null;
+    try {
+      if (bitgetClient) {
+        currentState = await fetchCurrentMarketState({ db: db.db || db, bitgetClient, symbol, timeframe, log: _log });
+      }
+    } catch (e) {
+      _log.warn('strategist_market_state_failed', { module: 'strategist', symbol, error: e.message });
+    }
+
+    const marketStates = [];
+    try {
+      const rawDb = db.db || db;
+      const latestTs = candles[candles.length - 1]?.ts || Date.now();
+      const recentStates = rawDb.prepare(
+        'SELECT * FROM market_state_history WHERE pair = ? AND timeframe = ? AND ts <= ? ORDER BY ts DESC LIMIT 240'
+      ).all(symbol, timeframe, latestTs).reverse();
+      marketStates.push(...recentStates);
+    } catch {}
+    if (currentState) marketStates.push(currentState);
+
+    return buildFeatureSnapshot({
+      candles,
+      marketStates,
+      timeframe,
+      ticker: {
+        lastPr: ticker.lastPr,
+        change24h: ticker.change24h,
+        fundingRate: currentState?.funding_rate || ticker.fundingRate,
+        usdtVolume: ticker.usdtVolume,
+      },
+    });
+  }
+
+  async function getCurrentExposurePct(symbol) {
+    if (!bitgetClient) return 0;
+    try {
+      const accounts = await bitgetClient.bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
+      const usdtBal = accounts?.find((a) => a.marginCoin === 'USDT');
+      const equity = parseFloat(usdtBal?.accountEquity || usdtBal?.usdtEquity || usdtBal?.equity || '0');
+      if (!equity) return 0;
+
+      const posData = await bitgetClient.bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+      const positions = Array.isArray(posData) ? posData : (posData?.list || []);
+      const pos = positions.find((p) => p.symbol === symbol && parseFloat(p.total || '0') > 0);
+      if (!pos) return 0;
+      const markPrice = parseFloat(pos.markPrice || pos.mark_price || pos.averageOpenPrice || '0');
+      const total = parseFloat(pos.total || '0');
+      const direction = pos.holdSide === 'long' ? 1 : -1;
+      if (!markPrice || !total) return 0;
+      return Number((((markPrice * total) / equity) * 100 * direction).toFixed(2));
+    } catch (e) {
+      _log.warn('strategist_exposure_failed', { module: 'strategist', symbol, error: e.message });
+      return 0;
+    }
+  }
+
   const STRATEGIST_EXECUTORS = {
     list_strategies: async () => {
+      const selectorActive = !!strategySelector?.hasSelection?.();
+      const selectedVersion = selectorActive ? strategySelector.getSelectedVersion() : null;
+
       // Compound strategies (AI-generated)
       let compoundStrategies = [];
       try {
-        compoundStrategies = db.prepare(
-          "SELECT strategy_id, name, description, direction, symbols, confidence, status, evidence_json FROM compound_strategies WHERE status = 'active' ORDER BY confidence DESC"
-        ).all().map(s => ({
+        const rows = selectorActive
+          ? strategySelector.getEligibleStrategies()
+          : db.prepare(
+            "SELECT strategy_id, family_id, version_id, role, name, description, direction, symbols, confidence, status, evidence_json FROM compound_strategies WHERE status = 'active' ORDER BY confidence DESC"
+          ).all();
+        compoundStrategies = rows.map(s => ({
           ...s,
           symbols: JSON.parse(s.symbols || '[]'),
           evidence: JSON.parse(s.evidence_json || '{}'),
+          target: JSON.parse(s.target_json || '{}'),
+          execution: JSON.parse(s.execution_json || '{}'),
           source: 'compound',
         }));
       } catch {}
 
       // Legacy manual strategies
       let manual = [];
-      try {
-        manual = db.prepare("SELECT * FROM strategies WHERE status = 'active'").all().map(r => ({
-          ...r, source: 'manual',
-          plan_json: r.plan_json ? JSON.parse(r.plan_json) : null,
-        }));
-      } catch {}
+      if (!selectorActive) {
+        try {
+          manual = db.prepare("SELECT * FROM strategies WHERE status = 'active'").all().map(r => ({
+            ...r, source: 'manual',
+            plan_json: r.plan_json ? JSON.parse(r.plan_json) : null,
+          }));
+        } catch {}
+      }
 
-      return JSON.stringify({ compound: compoundStrategies, manual, total: compoundStrategies.length + manual.length });
+      return JSON.stringify({
+        selector: selectorActive ? {
+          selected_family_id: selectedVersion?.family_id || null,
+          selected_version_id: selectedVersion?.version_id || null,
+          selected_version_name: selectedVersion?.version_name || null,
+          decision_mode: selectedVersion?.decision_mode || 'trigger',
+        } : null,
+        compound: compoundStrategies,
+        manual,
+        total: compoundStrategies.length + manual.length,
+      });
     },
 
     evaluate_strategy: async ({ strategy_id }) => {
@@ -119,32 +228,12 @@ Respond with JSON:
       const symbols = JSON.parse(strategy.symbols || '[]');
       const entryConditions = JSON.parse(strategy.entry_conditions || '[]');
       const exitConditions = JSON.parse(strategy.exit_conditions || '[]');
+      const timeframe = strategy.timeframe === 'any' ? '1H' : (strategy.timeframe || '1H');
 
       // Evaluate against each target symbol
       const results = [];
       for (const symbol of (symbols.length > 0 ? symbols : ['BTCUSDT'])) {
-        // Build indicator snapshot from available data
-        let snap = {};
-        try {
-          // Try to get candles from Bitget
-          if (bitgetClient) {
-            const evalTF = strategy.timeframe === 'any' ? '1H' : (strategy.timeframe || '1H');
-            const candles = await bitgetClient.bitgetPublic(
-              `/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=${evalTF}&limit=50`
-            );
-            if (candles?.length) {
-              const closes = candles.map(k => parseFloat(k[4])).reverse();
-              const highs = candles.map(k => parseFloat(k[2])).reverse();
-              const lows = candles.map(k => parseFloat(k[3])).reverse();
-
-              const tickers = await bitgetClient.bitgetPublic('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
-              const ticker = tickers?.find(t => t.symbol === symbol) || {};
-              snap = buildIndicatorSnapshot(closes, highs, lows, ticker);
-            }
-          }
-        } catch (e) {
-          _log.warn('indicator_fetch_failed', { module: 'strategist', symbol, error: e.message });
-        }
+        const snap = await buildLiveFeatureSnapshot(symbol, timeframe);
 
         const entry = evaluateConditions(entryConditions, snap, 'and');
         const exit = evaluateConditions(exitConditions, snap, 'or');
@@ -155,6 +244,11 @@ Respond with JSON:
             rsi_14: snap.rsi_14, funding_rate: snap.funding_rate,
             change_24h: snap.change_24h, trend: snap.trend,
             price: snap.price, bb_position: snap.bb_position,
+            regime: snap.regime,
+            days_in_regime: snap.days_in_regime,
+            bars_since_breakout: snap.bars_since_breakout,
+            overhead_supply_score_90d: snap.overhead_supply_score_90d,
+            oi_zscore_30d: snap.oi_zscore_30d,
           },
         });
       }
@@ -163,6 +257,8 @@ Respond with JSON:
         strategy_id, direction: strategy.direction, confidence: strategy.confidence,
         sizing: JSON.parse(strategy.sizing_json || '{}'),
         risk_params: JSON.parse(strategy.risk_params_json || '{}'),
+        target: JSON.parse(strategy.target_json || '{}'),
+        execution: JSON.parse(strategy.execution_json || '{}'),
         evaluations: results,
       });
     },
@@ -209,12 +305,68 @@ Respond with JSON:
     // Check both compound strategies and manual strategies
     let hasStrategies = false;
     try {
-      const compoundCount = db.prepare("SELECT COUNT(*) as cnt FROM compound_strategies WHERE status = 'active'").get().cnt;
-      const manualCount = db.prepare("SELECT COUNT(*) as cnt FROM strategies WHERE status = 'active'").get().cnt;
+      const compoundCount = strategySelector?.hasSelection?.()
+        ? strategySelector.getEligibleStrategyIds().length
+        : db.prepare("SELECT COUNT(*) as cnt FROM compound_strategies WHERE status = 'active'").get().cnt;
+      const manualCount = strategySelector?.hasSelection?.()
+        ? 0
+        : db.prepare("SELECT COUNT(*) as cnt FROM strategies WHERE status = 'active'").get().cnt;
       hasStrategies = (compoundCount + manualCount) > 0;
     } catch {}
 
     if (!hasStrategies) return null;
+
+    const selectedVersion = strategySelector?.getSelectedVersion?.();
+    if (selectedVersion?.decision_mode === 'target_position') {
+      try {
+        const strategies = strategySelector.getEligibleStrategies();
+        const symbol = 'BTCUSDT';
+        const timeframe = selectedVersion.version_id === 'wei2_0' ? '1H' : '1H';
+        const features = await buildLiveFeatureSnapshot(symbol, timeframe);
+        const currentExposurePct = await getCurrentExposurePct(symbol);
+        const activeTarget = db.getActiveStrategyTarget?.(symbol, selectedVersion.family_id, selectedVersion.version_id) || null;
+        const decision = evaluateTargetPositionDecision({
+          strategies,
+          features,
+          rules: strategySelector.getScopedRules(),
+          currentExposurePct,
+          activeTarget,
+        });
+        const targetDecision = {
+          ...decision,
+          symbol,
+          family_id: selectedVersion.family_id,
+          version_id: selectedVersion.version_id,
+          action: 'target_position',
+          feature_hints: {
+            atr_pct: features.atr_pct || 0,
+            bb_width: features.bb_width || 0,
+            price: features.price || 0,
+          },
+        };
+        const parsed = {
+          active_strategies: strategies.length,
+          triggered: [targetDecision],
+          target_decision: targetDecision,
+          summary: targetDecision.reason,
+        };
+        try {
+          insertDecision.run(new Date().toISOString(), 'strategist', 'target_position', '', '',
+            JSON.stringify(parsed), 'Wei2 target-position evaluation', parsed.summary || '', '', analystSignal.confidence || 0, null);
+        } catch {}
+        postMessage('strategist', 'risk', 'STRATEGY_TRIGGER', targetDecision, traceId);
+        _log.info('strategist_target_result', {
+          module: 'strategist',
+          strategy_id: targetDecision.strategy_id,
+          target_exposure_pct: targetDecision.target_exposure_pct,
+          delta_exposure_pct: targetDecision.delta_exposure_pct,
+        });
+        return parsed;
+      } catch (err) {
+        _log.error('strategist_target_error', { module: 'strategist', error: err.message });
+        return null;
+      }
+    }
 
     try {
       const result = await runAgent('strategist', STRATEGIST_SYSTEM_PROMPT, STRATEGIST_TOOLS, STRATEGIST_EXECUTORS,

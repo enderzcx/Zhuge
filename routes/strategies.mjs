@@ -3,7 +3,23 @@
  * Extracted from vps-api-index.mjs lines ~3050-3098.
  */
 
-export function registerStrategyRoutes(app, { db }) {
+function requireControlPlaneAuth(req, res, config) {
+  const expected = config?.AUTO_TRADE_SECRET;
+  if (!expected) {
+    res.status(503).json({ error: 'AUTO_TRADE_SECRET not configured' });
+    return false;
+  }
+
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token || token !== expected) {
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+export function registerStrategyRoutes(app, { db, strategySelector, config }) {
 
   app.get('/api/strategies', (req, res) => {
     const status = req.query.status || 'active';
@@ -50,6 +66,62 @@ export function registerStrategyRoutes(app, { db }) {
     try {
       db.db.prepare(`UPDATE strategies SET ${fields.join(', ')} WHERE id = ?`).run(...values);
       res.json({ success: true, id });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/strategy-selector', (req, res) => {
+    if (!strategySelector) return res.status(503).json({ error: 'strategy selector not available' });
+    try {
+      res.json(strategySelector.getSelectionInfo());
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/strategy-selector', (req, res) => {
+    if (!strategySelector) return res.status(503).json({ error: 'strategy selector not available' });
+    if (!requireControlPlaneAuth(req, res, config)) return;
+    const familyId = req.body.selected_family_id || req.body.family_id;
+    const versionId = req.body.selected_version_id || req.body.version_id;
+    const selectionMode = req.body.selection_mode || 'manual';
+    if (!familyId || !versionId) {
+      return res.status(400).json({ error: 'selected_family_id and selected_version_id required' });
+    }
+    try {
+      const result = strategySelector.setSelection({ familyId, versionId, selectionMode });
+      res.json({ success: true, ...result });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/compound-strategy-families', (req, res) => {
+    if (!strategySelector) return res.status(503).json({ error: 'strategy selector not available' });
+    try {
+      const families = strategySelector.listFamilies();
+      res.json({ data: families, count: families.length });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/strategy-targets', (req, res) => {
+    try {
+      const status = req.query.status || 'active';
+      const rows = db.listStrategyTargets ? db.listStrategyTargets(status) : [];
+      res.json({ data: rows, count: rows.length });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/strategy-orders', (req, res) => {
+    try {
+      const status = req.query.status || 'working';
+      const rows = db.listStrategyLadderOrders ? db.listStrategyLadderOrders(status) : [];
+      res.json({ data: rows, count: rows.length });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

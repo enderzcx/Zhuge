@@ -4,7 +4,7 @@
 
 import { calcRSI, calcBollinger } from './indicators.mjs';
 
-export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher, compound, log, metrics }) {
+export function createScanner({ db, config, bitgetClient, agentRunner, indicators, tradingLock, researcher, compound, log, metrics, strategySelector }) {
   const { bitgetPublic, bitgetRequest, roundPrice } = bitgetClient;
   const { runAgent } = agentRunner;
   const { insertDecision, insertTrade, insertCandidate, updateCandidateResearch, markCandidateTraded } = db;
@@ -306,9 +306,17 @@ Rules:
 
     // Load active compound strategies that target momentum symbols
     let activeStrategies = [];
+    const selectorActive = !!strategySelector?.hasSelection?.();
     try {
-      activeStrategies = db.prepare("SELECT * FROM compound_strategies WHERE status = 'active'")
-        .all().map(s => ({ ...s, symbols: JSON.parse(s.symbols || '[]'), risk_params: JSON.parse(s.risk_params_json || '{}'), sizing: JSON.parse(s.sizing_json || '{}') }));
+      const rows = selectorActive
+        ? strategySelector.getEligibleStrategies()
+        : db.prepare("SELECT * FROM compound_strategies WHERE status = 'active'").all();
+      activeStrategies = rows.map(s => ({
+        ...s,
+        symbols: JSON.parse(s.symbols || '[]'),
+        risk_params: JSON.parse(s.risk_params_json || '{}'),
+        sizing: JSON.parse(s.sizing_json || '{}'),
+      }));
     } catch {}
 
     // 1. Discover
@@ -383,6 +391,15 @@ Rules:
           s.symbols.includes(candidate.symbol) && (s.direction === report.direction || s.direction === 'both')
         );
         const minScore = _overrides.min_score || MOMENTUM.min_score;
+        if (selectorActive && !matchingStrat) {
+          _log.info('momentum_selector_skip', {
+            module: 'momentum',
+            symbol: candidate.symbol,
+            direction: report.direction,
+            reason: 'selector_active_no_matching_strategy',
+          });
+          continue;
+        }
         if (report.verdict === 'TRADE' && report.total_score >= minScore && report.direction) {
           const traded = await executeMomentumTrade(candidate.symbol, report, matchingStrat);
           if (traded) {

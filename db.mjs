@@ -282,6 +282,9 @@ export function createDB({ log } = {}) {
     CREATE TABLE IF NOT EXISTS compound_strategies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       strategy_id TEXT UNIQUE NOT NULL,
+      family_id TEXT,
+      version_id TEXT,
+      role TEXT,
       name TEXT NOT NULL,
       description TEXT NOT NULL,
       direction TEXT NOT NULL DEFAULT 'long',
@@ -291,6 +294,8 @@ export function createDB({ log } = {}) {
       exit_conditions TEXT NOT NULL DEFAULT '[]',
       sizing_json TEXT NOT NULL DEFAULT '{}',
       risk_params_json TEXT DEFAULT '{}',
+      target_json TEXT DEFAULT '{}',
+      execution_json TEXT DEFAULT '{}',
       status TEXT DEFAULT 'proposed',
       confidence REAL DEFAULT 0.5,
       evidence_json TEXT DEFAULT '{}',
@@ -302,11 +307,15 @@ export function createDB({ log } = {}) {
       superseded_by TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_cs_status ON compound_strategies(status);
+    CREATE INDEX IF NOT EXISTS idx_cs_family_version_status ON compound_strategies(family_id, version_id, status);
 
     -- Compound rules: AI-discovered trading patterns (agent/cognition/compound.mjs)
     CREATE TABLE IF NOT EXISTS compound_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       rule_id TEXT UNIQUE,
+      family_id TEXT,
+      version_id TEXT,
+      scope TEXT DEFAULT 'global',
       description TEXT NOT NULL,
       action TEXT,
       evidence_trade_ids TEXT,
@@ -420,6 +429,95 @@ export function createDB({ log } = {}) {
       llm_reasoning TEXT,
       run_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS strategy_families (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      family_id TEXT UNIQUE NOT NULL,
+      family_name TEXT NOT NULL,
+      status TEXT DEFAULT 'active',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_strategy_families_status ON strategy_families(status, family_id);
+
+    CREATE TABLE IF NOT EXISTS strategy_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      version_id TEXT UNIQUE NOT NULL,
+      family_id TEXT NOT NULL,
+      version_name TEXT NOT NULL,
+      status TEXT DEFAULT 'active',
+      is_live INTEGER DEFAULT 0,
+      decision_mode TEXT DEFAULT 'trigger',
+      rollout_mode TEXT DEFAULT 'live',
+      notes TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      activated_at TEXT,
+      retired_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_strategy_versions_family_status ON strategy_versions(family_id, status, is_live);
+
+    CREATE TABLE IF NOT EXISTS strategy_selector_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL DEFAULT 'global' UNIQUE,
+      selected_family_id TEXT,
+      selected_version_id TEXT,
+      selection_mode TEXT DEFAULT 'manual',
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS market_state_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pair TEXT NOT NULL,
+      timeframe TEXT NOT NULL DEFAULT '1H',
+      ts INTEGER NOT NULL,
+      mark_price REAL,
+      index_price REAL,
+      open_interest REAL,
+      funding_rate REAL,
+      basis_bps REAL,
+      oi_change_24h REAL,
+      source TEXT DEFAULT 'bitget',
+      UNIQUE(pair, timeframe, ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_market_state_pair_tf_ts ON market_state_history(pair, timeframe, ts);
+
+    CREATE TABLE IF NOT EXISTS strategy_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      family_id TEXT NOT NULL,
+      version_id TEXT NOT NULL,
+      strategy_id TEXT,
+      symbol TEXT NOT NULL,
+      side TEXT,
+      target_exposure_pct REAL DEFAULT 0,
+      current_exposure_pct REAL DEFAULT 0,
+      execution_style TEXT DEFAULT 'ladder',
+      expires_at TEXT,
+      status TEXT DEFAULT 'active',
+      reason TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      closed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_strategy_targets_symbol_status ON strategy_targets(symbol, status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS strategy_ladder_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_id INTEGER NOT NULL REFERENCES strategy_targets(id),
+      rung_index INTEGER NOT NULL,
+      intent TEXT NOT NULL,
+      price REAL,
+      size REAL NOT NULL,
+      reduce_only INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'working',
+      expires_at TEXT,
+      bitget_order_id TEXT,
+      trade_id TEXT,
+      filled_size REAL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(target_id, rung_index, intent)
+    );
+    CREATE INDEX IF NOT EXISTS idx_strategy_ladder_status ON strategy_ladder_orders(status, bitget_order_id, target_id);
   `);
 
   const insertNews = db.prepare(`
@@ -433,6 +531,15 @@ export function createDB({ log } = {}) {
   // Migrations for existing DBs
   try { db.exec('ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1'); } catch {}
   try { db.exec('ALTER TABLE trades ADD COLUMN strategy_id TEXT'); } catch {}
+  try { db.exec('ALTER TABLE compound_strategies ADD COLUMN family_id TEXT'); } catch {}
+  try { db.exec('ALTER TABLE compound_strategies ADD COLUMN version_id TEXT'); } catch {}
+  try { db.exec('ALTER TABLE compound_strategies ADD COLUMN role TEXT'); } catch {}
+  try { db.exec("ALTER TABLE compound_strategies ADD COLUMN target_json TEXT DEFAULT '{}'"); } catch {}
+  try { db.exec("ALTER TABLE compound_strategies ADD COLUMN execution_json TEXT DEFAULT '{}'"); } catch {}
+  try { db.exec("ALTER TABLE compound_rules ADD COLUMN family_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE compound_rules ADD COLUMN version_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE compound_rules ADD COLUMN scope TEXT DEFAULT 'global'"); } catch {}
+  try { db.exec("ALTER TABLE strategy_versions ADD COLUMN decision_mode TEXT DEFAULT 'trigger'"); } catch {}
 
   const insertTrade = db.prepare(`
     INSERT INTO trades (trade_id, source, pair, side, entry_price, amount, amount_out, leverage, status, tx_hash, signal_snapshot, decision_reasoning, opened_at)
@@ -543,13 +650,14 @@ export function createDB({ log } = {}) {
 
   // --- Compound strategies ---
   const insertCompoundStrategy = db.prepare(`
-    INSERT INTO compound_strategies (strategy_id, name, description, direction, symbols, timeframe, entry_conditions, exit_conditions, sizing_json, risk_params_json, status, confidence, source_compound_run)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO compound_strategies (strategy_id, name, description, direction, symbols, timeframe, entry_conditions, exit_conditions, sizing_json, risk_params_json, target_json, execution_json, status, confidence, source_compound_run)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(strategy_id) DO UPDATE SET
       name = excluded.name, description = excluded.description, direction = excluded.direction,
       symbols = excluded.symbols, entry_conditions = excluded.entry_conditions,
       exit_conditions = excluded.exit_conditions, sizing_json = excluded.sizing_json,
-      risk_params_json = excluded.risk_params_json, status = excluded.status,
+      risk_params_json = excluded.risk_params_json, target_json = excluded.target_json,
+      execution_json = excluded.execution_json, status = excluded.status,
       confidence = excluded.confidence, source_compound_run = excluded.source_compound_run
   `);
   const updateCompoundStrategyStatus = db.prepare(`
@@ -564,6 +672,109 @@ export function createDB({ log } = {}) {
     INSERT OR IGNORE INTO intel_items (title, source, link, score, signal, coins, category, origin, hash, triggered)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+
+  const upsertMarketState = db.prepare(`
+    INSERT INTO market_state_history (pair, timeframe, ts, mark_price, index_price, open_interest, funding_rate, basis_bps, oi_change_24h, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(pair, timeframe, ts) DO UPDATE SET
+      mark_price = excluded.mark_price,
+      index_price = excluded.index_price,
+      open_interest = excluded.open_interest,
+      funding_rate = excluded.funding_rate,
+      basis_bps = excluded.basis_bps,
+      oi_change_24h = excluded.oi_change_24h,
+      source = excluded.source
+  `);
+
+  const createStrategyTarget = db.prepare(`
+    INSERT INTO strategy_targets
+      (family_id, version_id, strategy_id, symbol, side, target_exposure_pct, current_exposure_pct, execution_style, expires_at, status, reason, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+  `);
+  const updateStrategyTarget = db.prepare(`
+    UPDATE strategy_targets
+    SET strategy_id = ?, side = ?, target_exposure_pct = ?, current_exposure_pct = ?, execution_style = ?, expires_at = ?, status = ?, reason = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `);
+  const closeStrategyTarget = db.prepare(`
+    UPDATE strategy_targets
+    SET status = ?, current_exposure_pct = ?, updated_at = datetime('now'), closed_at = CASE WHEN ? != 'active' THEN datetime('now') ELSE closed_at END
+    WHERE id = ?
+  `);
+  const createStrategyLadderOrder = db.prepare(`
+    INSERT INTO strategy_ladder_orders
+      (target_id, rung_index, intent, price, size, reduce_only, status, expires_at, bitget_order_id, trade_id, filled_size, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(target_id, rung_index, intent) DO UPDATE SET
+      price = excluded.price,
+      size = excluded.size,
+      reduce_only = excluded.reduce_only,
+      status = excluded.status,
+      expires_at = excluded.expires_at,
+      bitget_order_id = excluded.bitget_order_id,
+      trade_id = excluded.trade_id,
+      filled_size = excluded.filled_size,
+      updated_at = datetime('now')
+  `);
+  const updateStrategyLadderOrder = db.prepare(`
+    UPDATE strategy_ladder_orders
+    SET status = ?, bitget_order_id = ?, trade_id = ?, filled_size = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `);
+
+  function getActiveStrategyTarget(symbol, familyId = null, versionId = null) {
+    let sql = `SELECT * FROM strategy_targets WHERE symbol = ? AND status = 'active'`;
+    const args = [symbol];
+    if (familyId) { sql += ' AND family_id = ?'; args.push(familyId); }
+    if (versionId) { sql += ' AND version_id = ?'; args.push(versionId); }
+    sql += ' ORDER BY updated_at DESC LIMIT 1';
+    return db.prepare(sql).get(...args) || null;
+  }
+
+  function getStrategyTargetById(id) {
+    return db.prepare('SELECT * FROM strategy_targets WHERE id = ?').get(id) || null;
+  }
+
+  function listStrategyTargets(status = 'active') {
+    return db.prepare(
+      "SELECT * FROM strategy_targets WHERE status = ? ORDER BY updated_at DESC"
+    ).all(status);
+  }
+
+  function listStrategyLadderOrders(status = 'working') {
+    return db.prepare(
+      "SELECT * FROM strategy_ladder_orders WHERE status = ? ORDER BY updated_at DESC, id DESC"
+    ).all(status);
+  }
+
+  function getLadderOrdersForTarget(targetId, statuses = ['working']) {
+    if (!statuses?.length) {
+      return db.prepare('SELECT * FROM strategy_ladder_orders WHERE target_id = ? ORDER BY rung_index ASC').all(targetId);
+    }
+    const placeholders = statuses.map(() => '?').join(', ');
+    return db.prepare(
+      `SELECT * FROM strategy_ladder_orders WHERE target_id = ? AND status IN (${placeholders}) ORDER BY rung_index ASC`
+    ).all(targetId, ...statuses);
+  }
+
+  function findStrategyLadderOrderByBitgetOrderId(orderId) {
+    return db.prepare('SELECT * FROM strategy_ladder_orders WHERE bitget_order_id = ? ORDER BY id DESC LIMIT 1').get(orderId) || null;
+  }
+
+  function getLatestMarketState(pair, timeframe = '1H') {
+    return db.prepare(
+      'SELECT * FROM market_state_history WHERE pair = ? AND timeframe = ? ORDER BY ts DESC LIMIT 1'
+    ).get(pair, timeframe) || null;
+  }
+
+  function getMarketStateRange(pair, timeframe, startTs, endTs) {
+    let sql = 'SELECT * FROM market_state_history WHERE pair = ? AND timeframe = ?';
+    const args = [pair, timeframe];
+    if (startTs !== undefined && startTs !== null) { sql += ' AND ts >= ?'; args.push(startTs); }
+    if (endTs !== undefined && endTs !== null) { sql += ' AND ts <= ?'; args.push(endTs); }
+    sql += ' ORDER BY ts ASC';
+    return db.prepare(sql).all(...args);
+  }
 
   const upsertMemoryBackup = db.prepare(`
     INSERT INTO memory_backup (key, content, updated_at) VALUES (?, ?, datetime('now'))
@@ -599,6 +810,11 @@ export function createDB({ log } = {}) {
     insertCandidate, updateCandidateResearch, markCandidateTraded,
     insertCompoundStrategy, updateCompoundStrategyStatus, updateCompoundStrategyEvidence,
     insertPush, insertIntel,
+    upsertMarketState, createStrategyTarget, updateStrategyTarget, closeStrategyTarget,
+    createStrategyLadderOrder, updateStrategyLadderOrder,
+    getActiveStrategyTarget, getStrategyTargetById, listStrategyTargets,
+    listStrategyLadderOrders, getLadderOrdersForTarget, findStrategyLadderOrderByBitgetOrderId,
+    getLatestMarketState, getMarketStateRange,
     backupMemory, restoreMemory,
   };
 }

@@ -363,6 +363,7 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
       if (!strategy_id) return JSON.stringify({ error: 'strategy_id required' });
       try {
         const { loadCandles, candleCount } = await import('../../backtest/loader.mjs');
+        const { loadMarketStateHistory } = await import('../../backtest/market-state-loader.mjs');
         const { runBacktest } = await import('../../backtest/engine.mjs');
         const rawDb = db.db || db;
 
@@ -373,12 +374,17 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         if (existing.count < days * 24) {
           await loadCandles(rawDb, symbol, timeframe, startTs, endTs);
         }
+        await loadMarketStateHistory(rawDb, symbol, timeframe, startTs, endTs);
 
         const result = runBacktest({ db: rawDb, symbol, timeframe, strategyId: strategy_id, startTs, endTs });
         return JSON.stringify({
           strategy_id, symbol, timeframe, days,
           candles: result.candleCount,
           stats: result.stats,
+          time_stop_count: result.time_stop_count,
+          partial_fill_count: result.partial_fill_count,
+          target_changes: result.target_changes,
+          ladder_order_count: result.ladder_order_count,
           report: result.report,
           trades_sample: result.trades.slice(-5).map(t => ({
             side: t.side, entry: t.entryPrice, exit: t.exitPrice, pnl: t.pnl?.toFixed(2), reason: t.reason,
