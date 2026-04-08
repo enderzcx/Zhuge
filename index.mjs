@@ -138,11 +138,13 @@ _ragRef.instance = rag; // wire into analyst via getter
 const systemTools = createSystemTools({ log });
 // pushEngine is null here, will be set after bot creation. Use getter pattern.
 const _pushRef = { engine: null };
+const _klineRef = { instance: null };
 const dataTools = createDataTools({
   dataSources, priceStream, db: db.db, scanner,
   pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
   compound: agentCompound, readLogs, rag,
   intelStream, config,
+  klineMonitor: { subscribe: (...a) => _klineRef.instance?.subscribe(...a), unsubscribe: (...a) => _klineRef.instance?.unsubscribe(...a), getStatus: () => _klineRef.instance?.getStatus?.() || [], getIndicators: (...a) => _klineRef.instance?.getIndicators(...a) },
 });
 const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
 const memoryTools = createMemoryTools({ log, db });
@@ -202,6 +204,7 @@ app.get('/metrics', async (req, res) => {
 
 // --- K-line Monitor (real-time 5m/15m/1h indicator computation + signal detection) ---
 const klineMonitor = createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics });
+_klineRef.instance = klineMonitor;
 priceStream.setOnCandleClose((pair, candle) => klineMonitor.onCandleClose(pair, candle));
 klineMonitor.start();
 

@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 
-export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs, rag, intelStream, config }) {
+export function createDataTools({ dataSources, priceStream, db, scanner, pushEngine, compound, readLogs, rag, intelStream, config, klineMonitor }) {
   const { fetchCrucix, fetchNews, compactCrucixObj } = dataSources;
   const { priceCache } = priceStream;
 
@@ -294,6 +294,50 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
         properties: {
           limit: { type: 'number', description: '返回条数 (默认15)' },
         },
+      },
+      requiresConfirmation: false,
+    },
+    // --- K-line Monitor tools ---
+    {
+      name: 'kline_subscribe',
+      description: '订阅一个币种的实时K线监控 — 自动计算 5m/15m/1h 技术指标并检测信号。格式: XXX-USDT',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: { type: 'string', description: '交易对 (如 JOE-USDT, ZEC-USDT)' },
+        },
+        required: ['pair'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'kline_unsubscribe',
+      description: '取消订阅某个币种的K线监控（BTC/ETH/SOL 不可取消）',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: { type: 'string', description: '交易对 (如 JOE-USDT)' },
+        },
+        required: ['pair'],
+      },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'kline_status',
+      description: '查看当前所有K线监控状态 — 包含每个币种的蜡烛数量、最新RSI/EMA/MACD等',
+      parameters: { type: 'object', properties: {} },
+      requiresConfirmation: false,
+    },
+    {
+      name: 'kline_indicators',
+      description: '获取指定币种的最新技术指标快照（实时计算，不需要调外部API）',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: { type: 'string', description: '交易对 (如 BTC-USDT)' },
+          timeframe: { type: 'string', description: '时间周期: 5m/15m/1h (默认 5m)' },
+        },
+        required: ['pair'],
       },
       requiresConfirmation: false,
     },
@@ -869,6 +913,27 @@ export function createDataTools({ dataSources, priceStream, db, scanner, pushEng
           })),
         });
       } catch (err) { return JSON.stringify({ error: err.message }); }
+    },
+    // --- K-line Monitor executors ---
+    kline_subscribe: async ({ pair }) => {
+      if (!pair) return JSON.stringify({ error: 'pair required (e.g. JOE-USDT)' });
+      const result = klineMonitor?.subscribe?.(pair);
+      return JSON.stringify(result || { error: 'kline monitor not available' });
+    },
+    kline_unsubscribe: async ({ pair }) => {
+      if (!pair) return JSON.stringify({ error: 'pair required' });
+      const result = klineMonitor?.unsubscribe?.(pair);
+      return JSON.stringify(result || { error: 'kline monitor not available' });
+    },
+    kline_status: async () => {
+      const status = klineMonitor?.getStatus?.() || [];
+      return JSON.stringify({ monitored_pairs: status.length, pairs: status });
+    },
+    kline_indicators: async ({ pair, timeframe }) => {
+      if (!pair) return JSON.stringify({ error: 'pair required (e.g. BTC-USDT)' });
+      const ind = klineMonitor?.getIndicators?.(pair, timeframe || '5m');
+      if (!ind) return JSON.stringify({ error: `No data for ${pair} ${timeframe || '5m'} — not subscribed or not enough candles yet` });
+      return JSON.stringify(ind);
     },
   };
 

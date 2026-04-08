@@ -1,22 +1,30 @@
 /**
- * Real-time K-line monitor — continuous indicator computation + signal detection.
+ * Real-time K-line monitor — Bitget public WebSocket kline subscriptions
+ * + indicator computation + signal detection.
  *
- * Two-layer trigger:
- *   1. Snapshot (every 60s): compute indicators on current candles, detect warnings (no trading)
- *   2. Candle close (5m): compute on finalized candles, detect signals → trigger pipeline
+ * Architecture:
+ *   - Bitget public WS: subscribe to 5m candle channel per symbol
+ *   - On candle close: compute indicators, detect signals, trigger pipeline
+ *   - Snapshot every 60s: compute on live (unclosed) candle for early warnings
+ *   - Multi-timeframe: aggregate 5m → 15m → 1h in memory
+ *   - Dynamic subscribe/unsubscribe via agent tools
  *
- * Multi-timeframe: aggregates 5m → 15m → 1h in memory.
+ * Also listens to OKX candle close callback for base pairs (BTC/ETH/SOL)
+ * as a fallback data source.
  */
 
+import WebSocket from 'ws';
 import { computeIndicators } from './indicators.mjs';
 
 export function createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
   const CONF = config.KLINE_MONITOR || {};
-  if (!CONF.enabled) return { start() {}, stop() {}, onCandleClose() {}, getIndicators() { return null; } };
+  const DISABLED_API = { start() {}, stop() {}, onCandleClose() {}, getIndicators() { return null; }, subscribe() { return { error: 'disabled' }; }, unsubscribe() { return { error: 'disabled' }; }, getStatus() { return []; } };
+  if (!CONF.enabled) return DISABLED_API;
 
-  const PAIRS = config.PRICE_PAIRS || ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
+  const basePairs = config.PRICE_PAIRS || ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'];
+  const activePairs = new Set(basePairs);
   const SNAPSHOT_MS = CONF.snapshot_interval_ms || 60_000;
   const SIGNAL_COOLDOWN = CONF.signal_cooldown_ms || 60_000;
   const ALERT_COOLDOWN = CONF.alert_cooldown_ms || 300_000;
@@ -25,13 +33,25 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
 
   let snapshotTimer = null;
   let lastSignalTime = 0;
-  const alertCooldowns = {};  // pair → ts
+  const alertCooldowns = {};
 
-  // --- Per-symbol indicator cache (latest computed) ---
-  const indicatorCache = {};  // { 'BTC-USDT': { '5m': {...}, '15m': {...}, '1h': {...} } }
+  // --- Per-symbol indicator cache ---
+  const indicatorCache = {};
 
-  // --- In-memory candle arrays for aggregation ---
-  const candleArrays = {};    // { 'BTC-USDT': { '5m': [{ o, h, l, c, ts }], '15m': [...], '1h': [...] } }
+  // --- In-memory candle arrays ---
+  const candleArrays = {};
+
+  // --- Bitget Public WebSocket ---
+  const BITGET_PUBLIC_WS = 'wss://ws.bitget.com/v2/ws/public';
+  let _ws = null;
+  let _wsConnected = false;
+  let _reconnectTimer = null;
+  let _reconnectAttempts = 0;
+  let _pingInterval = null;
+  // Track which pairs are subscribed on WS (to avoid re-subscribing)
+  const wsSubscribed = new Set();
+  // Track last candle ts per pair to detect close
+  const lastCandleTs = {};
 
   function initPair(pair) {
     if (candleArrays[pair]) return;
@@ -46,11 +66,9 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       const rows = db.db.prepare(
         'SELECT open, high, low, close, ts_start FROM candles WHERE pair = ? ORDER BY ts_start DESC LIMIT ?'
       ).all(pair, HISTORY);
-      // Reverse to oldest-first
       candleArrays[pair]['5m'] = rows.reverse().map(r => ({
         o: r.open, h: r.high, l: r.low, c: r.close, ts: r.ts_start,
       }));
-      // Build 15m and 1h from 5m
       candleArrays[pair]['15m'] = aggregateCandles(candleArrays[pair]['5m'], 3);
       candleArrays[pair]['1h'] = aggregateCandles(candleArrays[pair]['5m'], 12);
       _log.info('kline_history_loaded', { module: 'kline', pair, candles_5m: candleArrays[pair]['5m'].length });
@@ -59,7 +77,223 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
     }
   }
 
-  // --- Aggregate N small candles into 1 larger candle ---
+  // --- Seed from Bitget REST API (for pairs without DB history) ---
+  async function seedFromBitget(pair) {
+    const symbol = pair.replace('-', '');
+    const url = `https://api.bitget.com/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=5m&limit=200`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`Bitget ${res.status}`);
+    const data = await res.json();
+    const candles = data?.data || [];
+    if (!candles.length) return;
+
+    const sorted = [...candles].reverse(); // oldest first
+    initPair(pair);
+    for (const c of sorted) {
+      const ts = new Date(parseInt(c[0])).toISOString();
+      const o = parseFloat(c[1]), h = parseFloat(c[2]), l = parseFloat(c[3]), cl = parseFloat(c[4]);
+      const vol = parseFloat(c[5]) || 0;
+      try { db.insertCandle.run(pair, o, h, l, cl, ts); } catch {}
+      candleArrays[pair]['5m'].push({ o, h, l, c: cl, v: vol, ts });
+    }
+    if (candleArrays[pair]['5m'].length > HISTORY) {
+      candleArrays[pair]['5m'] = candleArrays[pair]['5m'].slice(-HISTORY);
+    }
+    candleArrays[pair]['15m'] = aggregateCandles(candleArrays[pair]['5m'], 3);
+    candleArrays[pair]['1h'] = aggregateCandles(candleArrays[pair]['5m'], 12);
+    computeForPair(pair, '5m');
+    computeForPair(pair, '15m');
+    computeForPair(pair, '1h');
+    _log.info('kline_seeded', { module: 'kline', pair, candles: candleArrays[pair]['5m'].length });
+  }
+
+  // =====================================================
+  // Bitget Public WebSocket — kline channel
+  // =====================================================
+
+  function connectBitgetWS() {
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+
+    try { _ws = new WebSocket(BITGET_PUBLIC_WS); } catch (e) {
+      _log.error('kline_ws_create_failed', { module: 'kline', error: e.message });
+      _scheduleReconnect();
+      return;
+    }
+
+    _ws.on('open', () => {
+      _wsConnected = true;
+      _reconnectAttempts = 0;
+      _log.info('kline_ws_connected', { module: 'kline' });
+      // Re-subscribe all active pairs
+      wsSubscribed.clear();
+      for (const pair of activePairs) _wsSubscribe(pair);
+    });
+
+    _ws.on('message', (raw) => {
+      try {
+        const text = raw.toString();
+        if (text === 'pong') return;
+        const msg = JSON.parse(text);
+        if (msg.event === 'subscribe') return;
+        if (msg.data && msg.arg?.channel?.startsWith('candle')) {
+          _handleKlineData(msg);
+        }
+      } catch (e) {
+        _log.error('kline_ws_parse_error', { module: 'kline', error: e.message });
+      }
+    });
+
+    _ws.on('close', () => {
+      _wsConnected = false;
+      if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
+      _log.warn('kline_ws_disconnected', { module: 'kline' });
+      wsSubscribed.clear();
+      _scheduleReconnect();
+    });
+
+    _ws.on('error', (err) => {
+      _log.error('kline_ws_error', { module: 'kline', error: err.message });
+      _ws.close();
+    });
+
+    _pingInterval = setInterval(() => {
+      if (_ws?.readyState === WebSocket.OPEN) _ws.send('ping');
+      else { clearInterval(_pingInterval); _pingInterval = null; }
+    }, 25000);
+  }
+
+  function _scheduleReconnect() {
+    _reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, _reconnectAttempts), 60000);
+    _reconnectTimer = setTimeout(connectBitgetWS, delay);
+  }
+
+  function _wsSubscribe(pair) {
+    if (wsSubscribed.has(pair) || !_wsConnected) return;
+    // Bitget public kline channel: instId format = BTCUSDT (no dash)
+    const instId = pair.replace('-', '');
+    _ws.send(JSON.stringify({
+      op: 'subscribe',
+      args: [{ instType: 'USDT-FUTURES', channel: 'candle5m', instId }],
+    }));
+    wsSubscribed.add(pair);
+  }
+
+  function _wsUnsubscribe(pair) {
+    if (!wsSubscribed.has(pair) || !_wsConnected) return;
+    const instId = pair.replace('-', '');
+    _ws.send(JSON.stringify({
+      op: 'unsubscribe',
+      args: [{ instType: 'USDT-FUTURES', channel: 'candle5m', instId }],
+    }));
+    wsSubscribed.delete(pair);
+  }
+
+  /**
+   * Handle incoming kline data from Bitget WS.
+   * Bitget candle format: [ts, open, high, low, close, vol, quoteVol]
+   * The last candle in data[] is the current (unclosed) candle.
+   * When ts changes from previous push → previous candle has closed.
+   */
+  function _handleKlineData(msg) {
+    const instId = msg.arg?.instId;
+    if (!instId) return;
+    // Convert back to our pair format: BTCUSDT → BTC-USDT
+    const pair = instId.replace('USDT', '-USDT');
+    if (!activePairs.has(pair)) return;
+
+    for (const candle of msg.data) {
+      const ts = new Date(parseInt(candle[0])).toISOString();
+      const o = parseFloat(candle[1]), h = parseFloat(candle[2]);
+      const l = parseFloat(candle[3]), c = parseFloat(candle[4]);
+      const v = parseFloat(candle[5]) || 0;
+
+      const prevTs = lastCandleTs[pair];
+      lastCandleTs[pair] = ts;
+
+      if (prevTs && prevTs !== ts) {
+        // Timestamp changed → previous candle closed, this is a new candle
+        // The previous candle's final values are in our candleArrays (updated on prior pushes)
+        // Trigger candle close processing
+        _onCandleFinalized(pair);
+      }
+
+      // Update or append current candle in memory
+      initPair(pair);
+      const arr = candleArrays[pair]['5m'];
+      if (arr.length > 0 && arr[arr.length - 1].ts === ts) {
+        // Update existing (unclosed) candle
+        const last = arr[arr.length - 1];
+        last.h = h; last.l = l; last.c = c; last.v = v;
+      } else {
+        // New candle
+        arr.push({ o, h, l, c, v, ts });
+        if (arr.length > HISTORY) arr.shift();
+      }
+
+      // Persist to DB (upsert)
+      try { db.insertCandle.run(pair, o, h, l, c, ts); } catch {}
+    }
+  }
+
+  // =====================================================
+  // Candle close processing (shared by Bitget WS + OKX fallback)
+  // =====================================================
+
+  function _onCandleFinalized(pair) {
+    const arr5m = candleArrays[pair]?.['5m'];
+    if (!arr5m || arr5m.length < 20) return;
+
+    // Re-aggregate higher timeframes
+    candleArrays[pair]['15m'] = aggregateCandles(arr5m, 3);
+    candleArrays[pair]['1h'] = aggregateCandles(arr5m, 12);
+
+    // Compute indicators
+    const prev5m = indicatorCache[pair]?.['5m'] || null;
+    const ind5m = computeForPair(pair, '5m');
+    computeForPair(pair, '15m');
+    computeForPair(pair, '1h');
+
+    if (!ind5m) return;
+
+    // Detect signals
+    const signals = detectSignals(pair, ind5m, prev5m);
+    if (signals.length > 0) {
+      _log.info('kline_signal', { module: 'kline', pair, signals: signals.map(s => s.detail) });
+      _m.record('kline_signal_count', signals.length, { pair });
+      messageBus?.postMessage?.('kline-monitor', 'analyst', 'KLINE_SIGNAL', { pair, signals, indicators: ind5m });
+
+      const now = Date.now();
+      if (now - lastSignalTime > SIGNAL_COOLDOWN) {
+        lastSignalTime = now;
+        _log.info('kline_trigger_pipeline', { module: 'kline', pair, signals: signals.length });
+        pipeline?.collectAndAnalyze?.().catch(e =>
+          _log.error('kline_pipeline_trigger_error', { module: 'kline', error: e.message })
+        );
+      }
+    }
+
+    const last = arr5m[arr5m.length - 1];
+    _log.info('kline_close', { module: 'kline', pair, close: last?.c, ema20: ind5m.ema20?.toFixed(2), rsi14: ind5m.rsi14?.toFixed(1), macd_cross: ind5m.macd_cross });
+  }
+
+  /**
+   * OKX candle close fallback — called by prices.mjs for base pairs.
+   * If Bitget WS is handling this pair, skip (avoid double processing).
+   */
+  function onCandleClose(pair, candle) {
+    if (wsSubscribed.has(pair)) return; // Bitget WS handles it
+    initPair(pair);
+    const arr5m = candleArrays[pair]['5m'];
+    arr5m.push({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, v: 0, ts: candle.ts_start });
+    if (arr5m.length > HISTORY) arr5m.shift();
+    _onCandleFinalized(pair);
+  }
+
+  // =====================================================
+  // Indicator computation + signal detection
+  // =====================================================
+
   function aggregateCandles(candles, factor) {
     const result = [];
     for (let i = 0; i + factor <= candles.length; i += factor) {
@@ -69,24 +303,23 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
         h: Math.max(...chunk.map(c => c.h)),
         l: Math.min(...chunk.map(c => c.l)),
         c: chunk[chunk.length - 1].c,
+        v: chunk.reduce((s, c) => s + (c.v || 0), 0),
         ts: chunk[0].ts,
       });
     }
     return result;
   }
 
-  // --- Convert our candle format to indicators input ---
   function toIndicatorData(candles) {
     return {
       closes: candles.map(c => c.c),
       highs: candles.map(c => c.h),
       lows: candles.map(c => c.l),
       opens: candles.map(c => c.o),
-      volumes: candles.map(() => 0), // no volume from OKX ticks, use 0
+      volumes: candles.map(c => c.v || 0),
     };
   }
 
-  // --- Compute indicators for a pair + timeframe ---
   function computeForPair(pair, timeframe) {
     const candles = candleArrays[pair]?.[timeframe];
     if (!candles || candles.length < 20) return null;
@@ -102,25 +335,21 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
     }
   }
 
-  // --- Signal detection on finalized candle close ---
   function detectSignals(pair, indicators, prevIndicators) {
     if (!indicators || indicators.error) return [];
     const signals = [];
 
-    // EMA9/21 cross
     if (SIG.ema_cross && indicators.ma_cross) {
       const mc = indicators.ma_cross;
       if (mc.ema9_cross_ema21 === 'GOLDEN_CROSS') signals.push({ type: 'ema_cross', direction: 'bullish', detail: 'EMA9/21 golden cross' });
       if (mc.ema9_cross_ema21 === 'DEATH_CROSS') signals.push({ type: 'ema_cross', direction: 'bearish', detail: 'EMA9/21 death cross' });
     }
 
-    // MACD cross
     if (SIG.macd_cross && indicators.macd_cross) {
       if (indicators.macd_cross === 'BULLISH_CROSS') signals.push({ type: 'macd_cross', direction: 'bullish', detail: 'MACD bullish cross' });
       if (indicators.macd_cross === 'BEARISH_CROSS') signals.push({ type: 'macd_cross', direction: 'bearish', detail: 'MACD bearish cross' });
     }
 
-    // RSI extreme
     if (SIG.rsi_extreme) {
       const ob = SIG.rsi_extreme.overbought || 75;
       const os = SIG.rsi_extreme.oversold || 25;
@@ -128,7 +357,6 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       if (indicators.rsi14 >= ob) signals.push({ type: 'rsi_extreme', direction: 'bearish', detail: `RSI14 overbought: ${indicators.rsi14?.toFixed(1)}` });
     }
 
-    // BB squeeze
     if (SIG.bb_squeeze_threshold && indicators.bollinger) {
       const bb = indicators.bollinger;
       if (bb.bandwidth && bb.bandwidth < SIG.bb_squeeze_threshold) {
@@ -136,107 +364,131 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       }
     }
 
-    // BB breakout
     if (indicators.bb_position === 'ABOVE_UPPER') signals.push({ type: 'bb_breakout', direction: 'bullish', detail: 'Price above BB upper' });
     if (indicators.bb_position === 'BELOW_LOWER') signals.push({ type: 'bb_breakout', direction: 'bearish', detail: 'Price below BB lower' });
 
     return signals;
   }
 
-  // --- Candle close handler (called by prices.mjs on bucket transition) ---
-  function onCandleClose(pair, candle) {
-    initPair(pair);
+  // =====================================================
+  // Snapshot: periodic check on live candle
+  // =====================================================
 
-    // Append to 5m array (keep last HISTORY candles)
-    const arr5m = candleArrays[pair]['5m'];
-    arr5m.push({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, ts: candle.ts_start });
-    if (arr5m.length > HISTORY) arr5m.shift();
-
-    // Re-aggregate higher timeframes
-    candleArrays[pair]['15m'] = aggregateCandles(arr5m, 3);
-    candleArrays[pair]['1h'] = aggregateCandles(arr5m, 12);
-
-    // Compute indicators for all timeframes
-    const prev5m = indicatorCache[pair]?.['5m'] || null;
-    const ind5m = computeForPair(pair, '5m');
-    computeForPair(pair, '15m');
-    computeForPair(pair, '1h');
-
-    if (!ind5m) return;
-
-    // Detect signals on 5m (primary timeframe)
-    const signals = detectSignals(pair, ind5m, prev5m);
-    if (signals.length > 0) {
-      _log.info('kline_signal', { module: 'kline', pair, signals: signals.map(s => s.detail) });
-      _m.record('kline_signal_count', signals.length, { pair });
-
-      // Post to message bus
-      messageBus?.postMessage?.('kline-monitor', 'analyst', 'KLINE_SIGNAL', { pair, signals, indicators: ind5m });
-
-      // Trigger pipeline if cooldown allows
-      const now = Date.now();
-      if (now - lastSignalTime > SIGNAL_COOLDOWN) {
-        lastSignalTime = now;
-        _log.info('kline_trigger_pipeline', { module: 'kline', pair, signals: signals.length });
-        pipeline?.collectAndAnalyze?.().catch(e =>
-          _log.error('kline_pipeline_trigger_error', { module: 'kline', error: e.message })
-        );
-      }
-    }
-
-    _log.info('kline_close', { module: 'kline', pair, close: candle.close, ema20: ind5m.ema20?.toFixed(2), rsi14: ind5m.rsi14?.toFixed(1), macd_cross: ind5m.macd_cross });
-  }
-
-  // --- Snapshot: periodic check on current state (warnings only, no trading) ---
   function runSnapshot() {
-    for (const pair of PAIRS) {
-      if (!candleArrays[pair]?.['5m']?.length) continue;
+    for (const pair of activePairs) {
+      const arr = candleArrays[pair]?.['5m'];
+      if (!arr?.length) continue;
 
-      // Add current buffer as tentative candle
-      const buffer = priceStream.candleBuffer?.[pair];
-      if (buffer?.open) {
-        const tentative = [...candleArrays[pair]['5m'], { o: buffer.open, h: buffer.high, l: buffer.low, c: buffer.close, ts: buffer.ts_start }];
+      // For Bitget WS pairs, the last candle in array IS the live candle (continuously updated)
+      // For OKX pairs, use the candle buffer from priceStream
+      let tentative;
+      if (wsSubscribed.has(pair)) {
+        // Last element is already the live candle — just compute on current state
+        tentative = arr;
+      } else {
+        const buffer = priceStream.candleBuffer?.[pair];
+        if (buffer?.open) {
+          tentative = [...arr, { o: buffer.open, h: buffer.high, l: buffer.low, c: buffer.close, v: 0, ts: buffer.ts_start }];
+        } else {
+          tentative = arr;
+        }
+      }
+
+      if (tentative.length < 20) continue;
+      try {
         const data = toIndicatorData(tentative);
-        try {
-          const ind = computeIndicators(data, '5m-live');
-          if (ind && !ind.error) {
-            // Check for warnings (not signals — no pipeline trigger)
-            const warnings = detectSignals(pair, ind, indicatorCache[pair]?.['5m']);
-            if (warnings.length > 0) {
-              const now = Date.now();
-              if (!alertCooldowns[pair] || now - alertCooldowns[pair] > ALERT_COOLDOWN) {
-                alertCooldowns[pair] = now;
-                _log.info('kline_warning', { module: 'kline', pair, warnings: warnings.map(w => w.detail) });
-              }
+        const ind = computeIndicators(data, '5m-live');
+        if (ind && !ind.error) {
+          const warnings = detectSignals(pair, ind, indicatorCache[pair]?.['5m']);
+          if (warnings.length > 0) {
+            const now = Date.now();
+            if (!alertCooldowns[pair] || now - alertCooldowns[pair] > ALERT_COOLDOWN) {
+              alertCooldowns[pair] = now;
+              _log.info('kline_warning', { module: 'kline', pair, warnings: warnings.map(w => w.detail) });
             }
           }
-        } catch {}
-      }
+        }
+      } catch {}
     }
   }
 
-  // --- Public API ---
+  // =====================================================
+  // Dynamic subscription management
+  // =====================================================
+
+  async function subscribe(pair) {
+    if (activePairs.has(pair)) return { status: 'already_subscribed', pair };
+    activePairs.add(pair);
+    loadHistory(pair);
+
+    // Seed from REST if insufficient history
+    const loaded = candleArrays[pair]?.['5m']?.length || 0;
+    if (loaded < 50) {
+      try { await seedFromBitget(pair); } catch (e) {
+        _log.warn('kline_seed_failed', { module: 'kline', pair, error: e.message });
+      }
+    }
+
+    // Subscribe on Bitget WS for live updates
+    _wsSubscribe(pair);
+
+    const final = candleArrays[pair]?.['5m']?.length || 0;
+    _log.info('kline_subscribed', { module: 'kline', pair, total: activePairs.size, candles: final, ws: wsSubscribed.has(pair) });
+    return { status: 'subscribed', pair, candles: final, ws_live: wsSubscribed.has(pair) };
+  }
+
+  function unsubscribe(pair) {
+    if (!activePairs.has(pair)) return { status: 'not_subscribed', pair };
+    if (basePairs.includes(pair)) return { status: 'cannot_remove_base', pair };
+    activePairs.delete(pair);
+    _wsUnsubscribe(pair);
+    delete candleArrays[pair];
+    delete indicatorCache[pair];
+    delete lastCandleTs[pair];
+    _log.info('kline_unsubscribed', { module: 'kline', pair, total: activePairs.size });
+    return { status: 'unsubscribed', pair };
+  }
+
+  function getStatus() {
+    const pairs = [];
+    for (const pair of activePairs) {
+      const c5m = candleArrays[pair]?.['5m']?.length || 0;
+      const ind = indicatorCache[pair]?.['5m'];
+      pairs.push({
+        pair,
+        candles_5m: c5m,
+        ws_live: wsSubscribed.has(pair),
+        last_computed: ind?.computed_at || null,
+        price: ind?.price || null,
+        rsi14: ind?.rsi14 ? +ind.rsi14.toFixed(1) : null,
+        ema20: ind?.ema20 ? +ind.ema20.toFixed(2) : null,
+        macd_cross: ind?.macd_cross || null,
+      });
+    }
+    return pairs;
+  }
+
+  // =====================================================
+  // Lifecycle
+  // =====================================================
 
   function start() {
-    // Load history for all pairs
-    for (const pair of PAIRS) loadHistory(pair);
-
-    // Start periodic snapshot
+    for (const pair of activePairs) loadHistory(pair);
+    connectBitgetWS();
     snapshotTimer = setInterval(runSnapshot, SNAPSHOT_MS);
-    _log.info('kline_monitor_started', { module: 'kline', pairs: PAIRS, snapshot_ms: SNAPSHOT_MS });
+    _log.info('kline_monitor_started', { module: 'kline', pairs: [...activePairs], snapshot_ms: SNAPSHOT_MS });
   }
 
   function stop() {
     if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
+    if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
+    if (_ws) { try { _ws.close(); } catch {} }
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
   }
 
-  /**
-   * Get cached indicators for a symbol and timeframe.
-   * Used by agent tools to answer "what's BTC's current technical setup?" instantly.
-   */
   function getIndicators(pair, timeframe = '5m') {
     return indicatorCache[pair]?.[timeframe] || null;
   }
 
-  return { start, stop, onCandleClose, getIndicators, indicatorCache };
+  return { start, stop, onCandleClose, getIndicators, subscribe, unsubscribe, getStatus, indicatorCache };
 }
