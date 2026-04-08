@@ -149,6 +149,7 @@ export function createConfig() {
       macd_cross: true,                  // MACD bullish/bearish cross
       rsi_extreme: { overbought: 75, oversold: 25 },
       bb_squeeze_threshold: 0.03,        // BBW < 3% = squeeze warning
+      volume_spike: 2.5,                 // volume > 2.5x average = breakout
     },
   };
 

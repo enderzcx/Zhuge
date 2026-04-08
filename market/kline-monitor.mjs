@@ -16,7 +16,7 @@
 import WebSocket from 'ws';
 import { computeIndicators } from './indicators.mjs';
 
-export function createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics }) {
+export function createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics, pushEngine }) {
   const _log = log || { info() {}, warn() {}, error() {} };
   const _m = metrics || { record() {} };
   const CONF = config.KLINE_MONITOR || {};
@@ -33,6 +33,7 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
 
   let snapshotTimer = null;
   let lastSignalTime = 0;
+  let _initializing = true;  // suppress signals during history seed
   const alertCooldowns = {};
 
   // --- Per-symbol indicator cache ---
@@ -281,7 +282,8 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
 
     if (!ind5m) return;
 
-    // Detect signals
+    // Detect signals (skip during initialization to avoid history false positives)
+    if (_initializing) return;
     const signals = detectSignals(pair, ind5m, prev5m);
     if (signals.length > 0) {
       _log.info('kline_signal', { module: 'kline', pair, signals: signals.map(s => s.detail) });
@@ -291,6 +293,17 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       const now = Date.now();
       if (now - lastSignalTime > SIGNAL_COOLDOWN) {
         lastSignalTime = now;
+
+        // Push signal alert to TG so 诸葛 and user see it immediately
+        const signalSummary = signals.map(s => {
+          const icon = s.direction === 'bullish' ? '🟢' : s.direction === 'bearish' ? '🔴' : '🟡';
+          return `${icon} ${s.detail}`;
+        }).join('\n');
+        const price = ind5m.price ? `$${ind5m.price}` : '';
+        const alertText = `📊 K线信号: ${pair} ${price}\n${signalSummary}\nRSI:${ind5m.rsi14?.toFixed(1)} EMA20:${ind5m.ema20?.toFixed(2)}`;
+        pushEngine?.pushError?.({ source: 'kline', message: alertText }).catch(() => {});
+
+        // Trigger full pipeline analysis with signal context
         _log.info('kline_trigger_pipeline', { module: 'kline', pair, signals: signals.length });
         pipeline?.collectAndAnalyze?.().catch(e =>
           _log.error('kline_pipeline_trigger_error', { module: 'kline', error: e.message })
@@ -364,17 +377,20 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
     if (!indicators || indicators.error) return [];
     const signals = [];
 
+    // EMA9/21 cross
     if (SIG.ema_cross && indicators.ma_cross) {
       const mc = indicators.ma_cross;
       if (mc.ema9_cross_ema21 === 'GOLDEN_CROSS') signals.push({ type: 'ema_cross', direction: 'bullish', detail: 'EMA9/21 golden cross' });
       if (mc.ema9_cross_ema21 === 'DEATH_CROSS') signals.push({ type: 'ema_cross', direction: 'bearish', detail: 'EMA9/21 death cross' });
     }
 
+    // MACD cross
     if (SIG.macd_cross && indicators.macd_cross) {
       if (indicators.macd_cross === 'BULLISH_CROSS') signals.push({ type: 'macd_cross', direction: 'bullish', detail: 'MACD bullish cross' });
       if (indicators.macd_cross === 'BEARISH_CROSS') signals.push({ type: 'macd_cross', direction: 'bearish', detail: 'MACD bearish cross' });
     }
 
+    // RSI extreme
     if (SIG.rsi_extreme) {
       const ob = SIG.rsi_extreme.overbought || 75;
       const os = SIG.rsi_extreme.oversold || 25;
@@ -382,6 +398,7 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       if (indicators.rsi14 >= ob) signals.push({ type: 'rsi_extreme', direction: 'bearish', detail: `RSI14 overbought: ${indicators.rsi14?.toFixed(1)}` });
     }
 
+    // BB squeeze
     if (SIG.bb_squeeze_threshold && indicators.bollinger) {
       const bb = indicators.bollinger;
       if (bb.bandwidth && bb.bandwidth < SIG.bb_squeeze_threshold) {
@@ -389,8 +406,29 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
       }
     }
 
+    // BB breakout
     if (indicators.bb_position === 'ABOVE_UPPER') signals.push({ type: 'bb_breakout', direction: 'bullish', detail: 'Price above BB upper' });
     if (indicators.bb_position === 'BELOW_LOWER') signals.push({ type: 'bb_breakout', direction: 'bearish', detail: 'Price below BB lower' });
+
+    // Volume breakout: current candle volume > 2.5x average volume
+    const volSpike = SIG.volume_spike || 2.5;
+    const candles = candleArrays[pair]?.['5m'];
+    if (candles && candles.length >= 20) {
+      const recentVols = candles.slice(-21, -1).map(c => c.v || 0);
+      const avgVol = recentVols.reduce((s, v) => s + v, 0) / recentVols.length;
+      const currentVol = candles[candles.length - 1]?.v || 0;
+      if (avgVol > 0 && currentVol > avgVol * volSpike) {
+        const priceChange = indicators.price && indicators.ema20
+          ? ((indicators.price - indicators.ema20) / indicators.ema20 * 100).toFixed(2)
+          : '?';
+        const dir = indicators.price > indicators.ema20 ? 'bullish' : 'bearish';
+        signals.push({
+          type: 'volume_breakout',
+          direction: dir,
+          detail: `Volume spike ${(currentVol / avgVol).toFixed(1)}x avg, price ${priceChange}% vs EMA20`,
+        });
+      }
+    }
 
     return signals;
   }
@@ -499,6 +537,7 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
 
   function start() {
     for (const pair of activePairs) loadHistory(pair);
+    _initializing = false;  // done loading history, enable signal detection
     connectBitgetWS();
     snapshotTimer = setInterval(runSnapshot, SNAPSHOT_MS);
     _log.info('kline_monitor_started', { module: 'kline', pairs: [...activePairs], snapshot_ms: SNAPSHOT_MS });

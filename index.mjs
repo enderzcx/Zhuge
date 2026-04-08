@@ -204,7 +204,7 @@ app.get('/metrics', async (req, res) => {
 });
 
 // --- K-line Monitor (real-time 5m/15m/1h indicator computation + signal detection) ---
-const klineMonitor = createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics });
+const klineMonitor = createKlineMonitor({ db, priceStream, pipeline, messageBus, config, log, metrics, pushEngine: { pushError: (...a) => _pushRef.engine?.pushError?.(...a) } });
 _klineRef.instance = klineMonitor;
 priceStream.setOnCandleClose((pair, candle) => klineMonitor.onCandleClose(pair, candle));
 klineMonitor.start();
