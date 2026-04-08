@@ -161,6 +161,7 @@ const promptLoader = createPromptLoader({
   db: db.db,
   pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
   dataSources,
+  klineMonitor: { getStatus: () => _klineRef.instance?.getStatus?.() || [] },
 });
 const confirmHandler = createConfirmHandler({ tgCall: null, executor: toolExecutor, history: agentHistory, log }); // tgCall set after bot creation
 const agentBot = createAgentBot({

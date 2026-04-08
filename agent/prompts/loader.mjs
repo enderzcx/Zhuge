@@ -12,7 +12,7 @@ import {
 
 const PROMPTS_DIR = 'agent/prompts';
 
-export function createPromptLoader({ db, pushEngine, dataSources }) {
+export function createPromptLoader({ db, pushEngine, dataSources, klineMonitor }) {
   let staticCache = null;
 
   function loadStatic() {
@@ -170,6 +170,27 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
     }
   }
 
+  function loadKlineContext() {
+    try {
+      const status = klineMonitor?.getStatus?.();
+      if (!status || status.length === 0) return '';
+
+      const lines = status.map(p => {
+        const parts = [p.pair];
+        if (p.price) parts.push(`$${p.price}`);
+        if (p.rsi14 != null) parts.push(`RSI:${p.rsi14}`);
+        if (p.ema20) parts.push(`EMA20:${p.ema20}`);
+        if (p.macd_cross && p.macd_cross !== 'NONE') parts.push(p.macd_cross);
+        parts.push(p.ws_live ? 'LIVE' : 'DB');
+        return `- ${parts.join(' | ')}`;
+      });
+
+      return `\n\n## K线实时监控\n${lines.join('\n')}`;
+    } catch {
+      return '';
+    }
+  }
+
   function loadRecallableMemory(input = {}) {
     return buildRecallPrompt({
       query: input.userMessage || '',
@@ -195,6 +216,7 @@ export function createPromptLoader({ db, pushEngine, dataSources }) {
       loadCompoundRules(),
       loadCompoundStrategies(),
       liveContext,
+      loadKlineContext(),
       loadPushContext(),
       loadCurrentContext(),
     ];
