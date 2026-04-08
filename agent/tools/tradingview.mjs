@@ -15,7 +15,7 @@ let rpcId = 0;
 // --- MCP streamable-http client ---
 
 async function mcpCall(method, params) {
-  const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
   const sentId = ++rpcId;
@@ -30,9 +30,22 @@ async function mcpCall(method, params) {
   if (sid) sessionId = sid;
 
   if (!res.ok) throw new Error(`MCP HTTP ${res.status}`);
-  const data = await res.json();
+
+  // MCP streamable-http may return JSON or SSE depending on server
+  const contentType = res.headers.get('content-type') || '';
+  let data;
+  if (contentType.includes('text/event-stream')) {
+    // Parse SSE: extract last "data:" line containing JSON
+    const text = await res.text();
+    const dataLines = text.split('\n').filter(l => l.startsWith('data: '));
+    if (dataLines.length === 0) throw new Error('MCP SSE: no data lines');
+    data = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+  } else {
+    data = await res.json();
+  }
+
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-  if (data.id !== sentId) throw new Error(`MCP response id mismatch: sent ${sentId}, got ${data.id}`);
+  if (data.id !== undefined && data.id !== sentId) throw new Error(`MCP response id mismatch: sent ${sentId}, got ${data.id}`);
   return data.result;
 }
 
@@ -49,7 +62,7 @@ async function ensureSession() {
     // Send initialized notification (required by MCP spec)
     await fetch(MCP_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'mcp-session-id': sessionId },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'mcp-session-id': sessionId },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
       signal: AbortSignal.timeout(5000),
     }).catch(() => {});
