@@ -128,9 +128,46 @@ export function createHistory({ llm, db } = {}) {
     const conv = _get(conversationId);
     const msgs = conv.messages;
     const turns = msgs.filter(m => m.role === 'user').length;
-    if (turns <= WINDOW_SIZE) return [...msgs];
-    await _compress(conv);
-    return [...msgs];
+    if (turns > WINDOW_SIZE) await _compress(conv);
+    return _sanitizeMessages([...conv.messages]);
+  }
+
+  /**
+   * Sanitize messages before sending to LLM:
+   * - Remove dangling tool_calls without matching tool responses
+   * - Remove orphan tool responses without matching assistant tool_calls
+   * - Ensure no user message follows an assistant tool_call without tool response in between
+   * This prevents 400 errors from the LLM API.
+   */
+  function _sanitizeMessages(msgs) {
+    // Collect all tool_call ids that have a matching tool response
+    const toolResponseIds = new Set();
+    for (const m of msgs) {
+      if (m.role === 'tool' && m.tool_call_id) toolResponseIds.add(m.tool_call_id);
+    }
+
+    // Filter: remove assistant tool_calls without matching tool responses
+    const sanitized = [];
+    for (const m of msgs) {
+      if (m.role === 'assistant' && m.tool_calls?.length > 0) {
+        // Check if ALL tool_calls have matching responses
+        const allMatched = m.tool_calls.every(tc => toolResponseIds.has(tc.id));
+        if (!allMatched) {
+          // Drop the entire assistant message with dangling tool_calls
+          // (keeping it would cause LLM 400 because tool response is missing)
+          continue;
+        }
+      }
+      if (m.role === 'tool' && m.tool_call_id) {
+        // Check if there's a matching assistant tool_call before this
+        const hasMatch = sanitized.some(prev =>
+          prev.role === 'assistant' && prev.tool_calls?.some(tc => tc.id === m.tool_call_id)
+        );
+        if (!hasMatch) continue; // orphan tool response
+      }
+      sanitized.push(m);
+    }
+    return sanitized;
   }
 
   async function _compress(conv) {
