@@ -19,7 +19,7 @@ export function createTGStream(chatId, tgCall) {
   let lastFlushed = '';
   let timer = null;
   let typingTimer = null;
-  let flushing = false;
+  let flushPromise = null;
   let toolStatuses = [];       // [{ name, status }]
   let messageCount = 0;        // for long message splitting
 
@@ -123,18 +123,23 @@ export function createTGStream(chatId, tgCall) {
 
   /**
    * Flush buffer to TG via editMessageText.
+   * Uses a promise guard so finalize() can await the in-flight flush.
    */
   async function _flush() {
-    if (flushing || !messageId) return;
+    if (flushPromise || !messageId) return;
 
     const display = _buildDisplay();
     if (display === lastFlushed) return;
-    flushing = true;
 
+    flushPromise = _doFlush(display);
+    await flushPromise;
+    flushPromise = null;
+  }
+
+  async function _doFlush(display) {
     // Handle long messages: if over limit, send new message
     if (display.length > MAX_MSG_LEN) {
       await _splitAndSend(display);
-      flushing = false;
       return;
     }
 
@@ -150,7 +155,6 @@ export function createTGStream(chatId, tgCall) {
         messageId = null;
       }
     }
-    flushing = false;
   }
 
   /**
@@ -209,6 +213,8 @@ export function createTGStream(chatId, tgCall) {
     toolStatuses = toolStatuses.filter(t => t.status !== 'done'); // keep only errors
 
     if (messageId) {
+      // Await any in-flight flush so we don't skip the final edit
+      if (flushPromise) await flushPromise;
       lastFlushed = ''; // force flush
       await _flush();
     }
