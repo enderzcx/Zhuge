@@ -101,6 +101,7 @@ export function createConfig() {
     max_exposure_eth: 1.0,                           // hard cap total position
     max_exposure_pct: 0.30,                          // max % of account equity
     abandon_cooldown_ms: 30 * 60 * 1000,             // 30 min cooldown after abandon
+    force_flat_grace_minutes: 15,                    // default grace period before forced liquidation
     symbols: ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],     // tradable symbols
   };
 

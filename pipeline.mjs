@@ -16,7 +16,7 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, bi
   const log = _extLog || { info: _noop, warn: _noop, error: _noop, debug: _noop };
   const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
   const { runRiskCheck } = riskAgent;
-  const { executeBitgetTrade, openScoutPosition, scaleUpPosition, abandonPosition,
+  const { executeBitgetTrade, reconcileTargetPosition, openScoutPosition, scaleUpPosition, abandonPosition,
           checkScaleUpConditions, checkAbandonConditions } = bitgetExec;
   const { runStrategistCheck } = strategist;
   const SCALING = config.SCALING;
@@ -270,8 +270,28 @@ Output ONLY the JSON, no other text.`;
 
               // Close action = close existing position, NOT open a new one
               if (trigger.action === 'close') {
-                log.info('strategy_close_signal', { module: 'pipeline', strategy: trigger.strategy_id, symbol: trigger.symbol });
-                // TODO: implement position close via executor (for now, log only)
+                const symbol = trigger.symbol || 'BTCUSDT';
+                const group = bitgetExec.getActiveGroup(symbol);
+                if (group) {
+                  log.info('strategy_close_signal', { module: 'pipeline', strategy: trigger.strategy_id, symbol, groupId: group.id });
+                  abandonPosition(group, traceId).catch(err =>
+                    log.error('strategy_close_error', { module: 'pipeline', strategy: trigger.strategy_id, error: err.message })
+                  );
+                } else {
+                  log.info('strategy_close_no_position', { module: 'pipeline', strategy: trigger.strategy_id, symbol });
+                }
+                continue;
+              }
+
+              if (trigger.action === 'target_position') {
+                const riskVerdict = await runRiskCheck({ ...parsed, ...trigger }, traceId);
+                if (riskVerdict.pass) {
+                  reconcileTargetPosition(trigger, traceId).catch(err =>
+                    log.error('strategy_target_reconcile_error', { module: 'pipeline', strategy: trigger.strategy_id, error: err.message })
+                  );
+                } else {
+                  log.warn('strategy_target_risk_veto', { module: 'pipeline', strategy: trigger.strategy_id, reason: riskVerdict.reason });
+                }
                 continue;
               }
 

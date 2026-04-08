@@ -9,7 +9,11 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
   const { postMessage } = messageBus;
   const { insertTrade, insertDecision, updateTradeClose,
           insertPositionGroup, insertPositionLevel, updatePositionGroup, closePositionGroup,
-          getActiveGroup, getGroupLevels, getLastAbandonedTime } = db;
+          getActiveGroup, getGroupLevels, getLastAbandonedTime,
+          createStrategyTarget, updateStrategyTarget, closeStrategyTarget,
+          createStrategyLadderOrder, updateStrategyLadderOrder,
+          getActiveStrategyTarget, getStrategyTargetById, getLadderOrdersForTarget,
+          findStrategyLadderOrderByBitgetOrderId } = db;
   const SCALING = config.SCALING;
 
   // Trading mutex — prevent analyst + scanner from trading simultaneously
@@ -30,6 +34,256 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
     if (!config.BITGET_API_KEY) { _log.info('no_api_key', { module: 'bitget_exec' }); return; }
     if (!tradingLock.acquire()) { _log.info('trading_lock_active', { module: 'bitget_exec' }); return; }
     try { await _executeBitgetTradeInner(signal, traceId); } finally { tradingLock.release(); }
+  }
+
+  function _calcSpacingBasis(featureHints = {}) {
+    return Math.max(featureHints.atr_pct || 0, (featureHints.bb_width || 0) / 2, 0.0025);
+  }
+
+  async function _getExposureState(symbol) {
+    const accounts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES');
+    const usdtBal = accounts?.find((a) => a.marginCoin === 'USDT');
+    const equity = parseFloat(usdtBal?.accountEquity || usdtBal?.usdtEquity || usdtBal?.equity || '0');
+    const available = parseFloat(usdtBal?.crossedMaxAvailable || usdtBal?.available || '0');
+
+    const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
+    const positions = Array.isArray(posData) ? posData : (posData?.list || []);
+    const position = positions.find((p) => p.symbol === symbol && parseFloat(p.total || '0') > 0) || null;
+
+    const markPrice = parseFloat(position?.markPrice || position?.mark_price || position?.averageOpenPrice || '0');
+    const size = parseFloat(position?.total || '0');
+    const holdSide = position?.holdSide || null;
+    const direction = holdSide === 'long' ? 1 : holdSide === 'short' ? -1 : 0;
+    const currentExposurePct = equity > 0 && markPrice > 0 && size > 0
+      ? Number((((markPrice * size) / equity) * 100 * direction).toFixed(2))
+      : 0;
+
+    return {
+      equity,
+      available,
+      position,
+      holdSide,
+      size,
+      markPrice,
+      currentExposurePct,
+    };
+  }
+
+  function _buildLadderOrders(targetSignal, currentExposurePct, price, equity) {
+    const execution = targetSignal.execution || {};
+    const rungCount = execution.rung_count || 3;
+    const sizeCurve = execution.size_curve || [0.3, 0.3, 0.4];
+    const spacingMultipliers = execution.spacing_multipliers || [0.25, 0.5, 0.9];
+    const spacingBasis = _calcSpacingBasis(targetSignal.feature_hints || {});
+    const delta = Number((targetSignal.target_exposure_pct - currentExposurePct).toFixed(2));
+    if (Math.abs(delta) < 0.1) return [];
+
+    const targetSide = targetSignal.target_exposure_pct > 0 ? 'long' : targetSignal.target_exposure_pct < 0 ? 'short' : 'flat';
+    const currentSide = currentExposurePct > 0 ? 'long' : currentExposurePct < 0 ? 'short' : 'flat';
+    const reducing = targetSide === 'flat' || (currentSide !== 'flat' && currentSide !== targetSide);
+    const side = reducing ? (currentExposurePct > 0 ? 'sell' : 'buy') : (delta > 0 ? 'buy' : 'sell');
+    const tradeSide = reducing ? 'close' : 'open';
+    const reduceOnly = reducing ? 1 : 0;
+    const absDelta = Math.abs(delta);
+
+    return Array.from({ length: rungCount }, (_, idx) => {
+      const share = sizeCurve[idx] || 0;
+      const rungExposurePct = absDelta * share;
+      const notional = (equity * rungExposurePct) / 100;
+      const size = price > 0 ? Number((notional / price).toFixed(4)) : 0;
+      const multiplier = spacingMultipliers[idx] || spacingMultipliers[spacingMultipliers.length - 1] || 0.5;
+      const bias = spacingBasis * multiplier;
+      const orderPrice = side === 'buy' ? price * (1 - bias) : price * (1 + bias);
+      return {
+        rung_index: idx,
+        intent: reducing ? 'reduce' : 'open',
+        side,
+        tradeSide,
+        reduceOnly,
+        price: Number(orderPrice.toFixed(2)),
+        size,
+      };
+    }).filter((order) => order.size > 0);
+  }
+
+  async function _cancelStrategyOrder(order, symbol) {
+    if (order.bitget_order_id) {
+      try {
+        await bitgetRequest('POST', '/api/v2/mix/order/cancel-order', {
+          symbol,
+          productType: 'USDT-FUTURES',
+          orderId: order.bitget_order_id,
+        });
+      } catch (err) {
+        _log.warn('strategy_ladder_cancel_failed', { module: 'bitget_exec', orderId: order.bitget_order_id, error: err.message });
+      }
+    }
+    try {
+      updateStrategyLadderOrder.run('cancelled', order.bitget_order_id || null, order.trade_id || null, order.filled_size || 0, order.id);
+    } catch {}
+  }
+
+  async function _forceFlatPosition(symbol, exposureState, reason, traceId) {
+    if (!exposureState?.position || !exposureState.holdSide || exposureState.size <= 0) return null;
+    const side = exposureState.holdSide === 'long' ? 'sell' : 'buy';
+    const order = await bitgetRequest('POST', '/api/v2/mix/order/place-order', {
+      symbol,
+      productType: 'USDT-FUTURES',
+      marginMode: 'crossed',
+      marginCoin: 'USDT',
+      side,
+      tradeSide: 'close',
+      orderType: 'market',
+      size: String(exposureState.size),
+    });
+    insertDecision.run(new Date().toISOString(), 'executor', 'force_flat', 'place-order',
+      JSON.stringify({ symbol, side, size: exposureState.size, reason }),
+      JSON.stringify(order), `Force flat ${symbol}`, reason, '', 0, null);
+    postMessage('executor', 'risk', 'ALERT', { type: 'force_flat', symbol, reason }, traceId);
+    return order;
+  }
+
+  async function reconcileTargetPosition(targetSignal, traceId) {
+    if (!config.BITGET_API_KEY) return null;
+    if (!tradingLock.acquire()) { _log.info('trading_lock_active', { module: 'bitget_exec', action: 'reconcile_target' }); return null; }
+
+    try {
+      const symbol = (targetSignal.symbol || 'BTCUSDT').toUpperCase();
+      const exposureState = await _getExposureState(symbol);
+      const existingTarget = getActiveStrategyTarget(symbol, targetSignal.family_id, targetSignal.version_id);
+      const workingOrders = existingTarget ? getLadderOrdersForTarget(existingTarget.id, ['working', 'partially_filled']) : [];
+      const desiredTargetPct = Number(targetSignal.target_exposure_pct || 0);
+      const desiredSide = desiredTargetPct > 0 ? 'long' : desiredTargetPct < 0 ? 'short' : 'flat';
+      const executionStyle = targetSignal.execution_style || 'ladder';
+
+      let targetId = existingTarget?.id || null;
+      if (!targetId) {
+        const result = createStrategyTarget.run(
+          targetSignal.family_id,
+          targetSignal.version_id,
+          targetSignal.strategy_id,
+          symbol,
+          desiredSide,
+          desiredTargetPct,
+          exposureState.currentExposurePct,
+          executionStyle,
+          targetSignal.expires_at || null,
+          'active',
+          targetSignal.reason || ''
+        );
+        targetId = result.lastInsertRowid;
+      } else {
+        updateStrategyTarget.run(
+          targetSignal.strategy_id,
+          desiredSide,
+          desiredTargetPct,
+          exposureState.currentExposurePct,
+          executionStyle,
+          targetSignal.expires_at || null,
+          'active',
+          targetSignal.reason || '',
+          targetId
+        );
+      }
+
+      const targetChanged = !existingTarget ||
+        Number(existingTarget.target_exposure_pct || 0) !== desiredTargetPct ||
+        existingTarget.strategy_id !== targetSignal.strategy_id ||
+        existingTarget.side !== desiredSide;
+
+      const graceMs = ((targetSignal.execution?.force_flat_grace_minutes) || SCALING?.force_flat_grace_minutes || 15) * 60000;
+      if (existingTarget && desiredTargetPct === 0 && exposureState.position) {
+        const staleMs = Date.now() - Date.parse(existingTarget.updated_at);
+        if (staleMs >= graceMs) {
+          for (const order of workingOrders) await _cancelStrategyOrder(order, symbol);
+          await _forceFlatPosition(symbol, exposureState, 'force_flat_grace_elapsed', traceId);
+          closeStrategyTarget.run('force_flat', 0, 'force_flat', targetId);
+          return { target_id: targetId, forced_flat: true };
+        }
+      }
+
+      if (targetChanged) {
+        for (const order of workingOrders) await _cancelStrategyOrder(order, symbol);
+      }
+
+      const price = targetSignal.feature_hints?.price || exposureState.markPrice || _getSymbolPrice(symbol);
+      if (!price || !exposureState.equity) {
+        _log.warn('strategy_target_no_price', { module: 'bitget_exec', symbol, price, equity: exposureState.equity });
+        return null;
+      }
+
+      const ladderOrders = _buildLadderOrders(targetSignal, exposureState.currentExposurePct, price, exposureState.equity);
+      for (const order of ladderOrders) {
+        const leverage = String(targetSignal.params?.leverage_cap || config.SCALING?.leverage || config.MOMENTUM?.leverage || 10);
+        const roundedPrice = await roundPrice(symbol, order.price);
+        const payload = {
+          symbol,
+          productType: 'USDT-FUTURES',
+          marginMode: 'crossed',
+          marginCoin: 'USDT',
+          side: order.side,
+          tradeSide: order.tradeSide,
+          orderType: 'limit',
+          size: String(order.size),
+          price: String(roundedPrice),
+        };
+        const resp = await bitgetRequest('POST', '/api/v2/mix/order/place-order', payload);
+        const orderId = resp?.orderId || '';
+        const tradeId = orderId ? `bg_${orderId}` : null;
+
+        if (tradeId) {
+          insertTrade.run(
+            tradeId, 'bitget', symbol, order.side, roundedPrice, order.size, 0,
+            parseInt(leverage, 10), 'open', orderId, JSON.stringify(targetSignal),
+            `target_position ${targetSignal.strategy_id} ${order.intent} rung:${order.rung_index}`, new Date().toISOString()
+          );
+          try { db.prepare('UPDATE trades SET strategy_id = ? WHERE trade_id = ?').run(targetSignal.strategy_id, tradeId); } catch {}
+        }
+
+        createStrategyLadderOrder.run(
+          targetId,
+          order.rung_index,
+          order.intent,
+          roundedPrice,
+          order.size,
+          order.reduceOnly,
+          'working',
+          targetSignal.expires_at || null,
+          orderId || null,
+          tradeId,
+          0
+        );
+      }
+
+      insertDecision.run(new Date().toISOString(), 'executor', 'reconcile_target', 'place-ladder',
+        JSON.stringify({
+          symbol,
+          target_exposure_pct: desiredTargetPct,
+          current_exposure_pct: exposureState.currentExposurePct,
+          ladder_orders: ladderOrders.length,
+        }),
+        JSON.stringify({ targetSignal }),
+        `Reconcile target ${symbol}`,
+        targetSignal.reason || '',
+        '',
+        0,
+        null
+      );
+
+      return {
+        target_id: targetId,
+        ladder_orders: ladderOrders.length,
+        current_exposure_pct: exposureState.currentExposurePct,
+        target_exposure_pct: desiredTargetPct,
+      };
+    } catch (err) {
+      _log.error('reconcile_target_failed', { module: 'bitget_exec', error: err.message });
+      insertDecision.run(new Date().toISOString(), 'executor', 'reconcile_target_error', '', '',
+        JSON.stringify({ error: err.message, targetSignal }), 'Target reconciliation failed', err.message, '', 0, null);
+      return null;
+    } finally {
+      tradingLock.release();
+    }
   }
 
   function calculateKellySize(available, symbol, currentPrice) {
@@ -783,6 +1037,34 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
     if (!fill.orderId || fill.fillPrice <= 0) return;
 
     const tradeId = `bg_${fill.orderId}`;
+    const ladderOrder = findStrategyLadderOrderByBitgetOrderId(fill.orderId);
+
+    if (ladderOrder) {
+      const fillSize = parseFloat(fill.fillSize || '0');
+      const nextStatus = fillSize > 0 && fillSize < ladderOrder.size ? 'partially_filled' : 'filled';
+      try {
+        updateStrategyLadderOrder.run(nextStatus, fill.orderId, ladderOrder.trade_id || tradeId, fillSize || ladderOrder.size, ladderOrder.id);
+      } catch {}
+      try {
+        const target = getStrategyTargetById(ladderOrder.target_id);
+        if (target) {
+          const currentPct = target.current_exposure_pct || 0;
+          const delta = (target.target_exposure_pct - currentPct);
+          const approxPct = delta === 0 ? currentPct : Number((currentPct + (delta * (fillSize > 0 && ladderOrder.size > 0 ? (fillSize / ladderOrder.size) : 1))).toFixed(2));
+          updateStrategyTarget.run(
+            target.strategy_id,
+            target.side,
+            target.target_exposure_pct,
+            approxPct,
+            target.execution_style || 'ladder',
+            target.expires_at,
+            target.status,
+            target.reason || '',
+            target.id
+          );
+        }
+      } catch {}
+    }
 
     // Update entry price for open orders
     if (fill.tradeSide === 'open') {
@@ -831,6 +1113,18 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
           updateTradeClose.run(fill.fillPrice, pnl, pnlPct, new Date().toISOString(), openTrade.trade_id);
           _log.info('ws_trade_closed', { module: 'ws_handler', tradeId: openTrade.trade_id, exitPrice: fill.fillPrice, pnl: pnl.toFixed(4) });
+        }
+
+        if (ladderOrder) {
+          try {
+            const target = getStrategyTargetById(ladderOrder.target_id);
+            if (target) {
+              const remainingWorking = getLadderOrdersForTarget(target.id, ['working', 'partially_filled']);
+              if (remainingWorking.length === 0) {
+                closeStrategyTarget.run(target.target_exposure_pct === 0 ? 'closed' : target.status, target.current_exposure_pct, target.status || 'closed', target.id);
+              }
+            }
+          } catch {}
         }
 
         // Close position_group if scaling enabled
@@ -883,7 +1177,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
   }
 
   return {
-    executeBitgetTrade, tradingLock, checkAndSyncTrades,
+    executeBitgetTrade, reconcileTargetPosition, tradingLock, checkAndSyncTrades,
     // Scaling API
     openScoutPosition, scaleUpPosition, abandonPosition,
     checkScaleUpConditions, checkAbandonConditions,
