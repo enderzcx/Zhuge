@@ -1,8 +1,8 @@
 /**
- * OKX WebSocket price streaming, candle buffering, anomaly detection.
+ * Price cache, candle buffering, anomaly detection.
+ * Tick data is fed externally via feedTick() — from Bitget public WS (via kline-monitor).
+ * No longer connects to OKX WebSocket directly.
  */
-
-import WebSocket from 'ws';
 
 export function createPriceStream({ db, config, log, metrics }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
@@ -13,9 +13,7 @@ export function createPriceStream({ db, config, log, metrics }) {
   const FLASH_THRESHOLD = 0.05;    // 5% in 5min → FLASH alert
   const PRICE_WINDOW = 5 * 60 * 1000; // 5 min
 
-  let wsConnected = false;
-  let wsReconnectTimer = null;
-  let _pingInterval = null;
+  let _connected = false;
   let _anomalyHandler = null;
   let _onCandleClose = null;
 
@@ -28,8 +26,7 @@ export function createPriceStream({ db, config, log, metrics }) {
   }
   initPriceCache();
 
-  // --- Candle Buffer (5-min OHLCV) ---
-  const CANDLE_INTERVAL = 5 * 60 * 1000; // 5 min
+  // --- Candle Buffer (5-min OHLCV from ticks) ---
   const candleBuffer = {};
 
   function getCandleBucket(ts) {
@@ -45,7 +42,6 @@ export function createPriceStream({ db, config, log, metrics }) {
     try {
       insertCandle.run(pair, candle.open, candle.high, candle.low, candle.close, candle.ts_start);
     } catch (e) { _log.warn('candle_insert_failed', { module: 'prices', pair, error: e.message }); }
-    // Notify kline monitor on bucket transition (candle is finalized)
     if (isBucketTransition && _onCandleClose) {
       try { _onCandleClose(pair, { ...candle }); } catch {}
     }
@@ -55,7 +51,6 @@ export function createPriceStream({ db, config, log, metrics }) {
     const bucket = getCandleBucket(ts);
     const existing = candleBuffer[pair];
     if (!existing || existing.ts_start !== bucket) {
-      // New bucket — flush previous candle and start fresh
       if (existing) flushCandle(pair, true);
       candleBuffer[pair] = { open: price, high: price, low: price, close: price, ts_start: bucket };
     } else {
@@ -65,21 +60,23 @@ export function createPriceStream({ db, config, log, metrics }) {
     }
   }
 
-  // Safety flush every 60s (handles low-activity periods)
+  // Safety flush every 60s
   setInterval(() => {
-    for (const pair of PRICE_PAIRS) {
+    for (const pair of Object.keys(candleBuffer)) {
       if (candleBuffer[pair]) flushCandle(pair);
     }
   }, 60000);
 
   function updatePrice(pair, price, ts) {
+    // Auto-init priceCache for dynamically subscribed pairs
+    if (!priceCache[pair]) {
+      priceCache[pair] = { price: 0, ts: 0, change5m: 0, high5m: 0, low5m: 0, history: [] };
+    }
     const c = priceCache[pair];
-    if (!c) return;
     c.price = price;
     c.ts = ts;
     c.history.push({ price, ts });
 
-    // Trim history to 5min window
     const cutoff = ts - PRICE_WINDOW;
     while (c.history.length > 0 && c.history[0].ts < cutoff) c.history.shift();
 
@@ -90,7 +87,6 @@ export function createPriceStream({ db, config, log, metrics }) {
       c.low5m = Math.min(...c.history.map(h => h.price));
     }
 
-    // Feed candle buffer
     updateCandle(pair, price, ts);
   }
 
@@ -103,7 +99,6 @@ export function createPriceStream({ db, config, log, metrics }) {
     return null;
   }
 
-  // Cooldown: don't trigger analysis more than once per 3 min per pair
   const anomalyCooldowns = {};
 
   function handleAnomaly(anomaly) {
@@ -117,65 +112,20 @@ export function createPriceStream({ db, config, log, metrics }) {
     _log.info('price_anomaly', { module: 'prices', level: anomaly.level, pair: anomaly.pair, direction, changePct: pctStr, price: anomaly.price });
     metrics?.record('price_anomaly', Math.abs(anomaly.change) * 100, { pair: anomaly.pair, level: anomaly.level });
 
-    // Trigger instant analysis via callback
     if (_anomalyHandler) {
       _anomalyHandler(anomaly);
     }
   }
 
-  function connectOKXWebSocket() {
-    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-    const ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
-
-    ws.on('open', () => {
-      wsConnected = true;
-      _log.info('ws_connected', { module: 'prices', exchange: 'OKX' });
-      // Subscribe to tickers
-      ws.send(JSON.stringify({
-        op: 'subscribe',
-        args: PRICE_PAIRS.map(pair => ({ channel: 'tickers', instId: pair })),
-      }));
-    });
-
-    ws.on('message', (raw) => {
-      try {
-        const text = raw.toString();
-        if (text === 'pong') return; // OKX ping/pong heartbeat, not JSON
-        const msg = JSON.parse(text);
-        if (msg.data && Array.isArray(msg.data)) {
-          for (const tick of msg.data) {
-            const pair = tick.instId;
-            const price = parseFloat(tick.last);
-            const ts = parseInt(tick.ts) || Date.now();
-            if (pair && price > 0) {
-              updatePrice(pair, price, ts);
-              const anomaly = checkPriceAnomaly(pair);
-              if (anomaly) handleAnomaly(anomaly);
-            }
-          }
-        }
-      } catch (e) { _log.error('ws_parse_error', { module: 'prices', error: e.message }); }
-    });
-
-    ws.on('close', () => {
-      wsConnected = false;
-      if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
-      _log.warn('ws_disconnected', { module: 'prices', exchange: 'OKX' });
-      metrics?.record('ws_disconnect', 1, { exchange: 'OKX' });
-      wsReconnectTimer = setTimeout(connectOKXWebSocket, 5000);
-    });
-
-    ws.on('error', (err) => {
-      _log.error('ws_error', { module: 'prices', exchange: 'OKX', error: err.message });
-      metrics?.record('ws_error', 1, { exchange: 'OKX' });
-      ws.close();
-    });
-
-    // Ping every 25s to keep alive
-    _pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) ws.send('ping');
-      else { clearInterval(_pingInterval); _pingInterval = null; }
-    }, 25000);
+  /**
+   * Feed a tick from external source (Bitget WS via kline-monitor).
+   * This replaces the old OKX WebSocket connection.
+   */
+  function feedTick(pair, price, ts) {
+    _connected = true;
+    updatePrice(pair, price, ts);
+    const anomaly = checkPriceAnomaly(pair);
+    if (anomaly) handleAnomaly(anomaly);
   }
 
   function setAnomalyHandler(fn) {
@@ -188,21 +138,23 @@ export function createPriceStream({ db, config, log, metrics }) {
 
   function getPriceData() {
     const prices = {};
-    for (const pair of PRICE_PAIRS) {
+    for (const pair of Object.keys(priceCache)) {
       const c = priceCache[pair];
-      prices[pair] = { price: c.price, change5m: (c.change5m * 100).toFixed(2) + '%', high5m: c.high5m, low5m: c.low5m };
+      if (c.price > 0) {
+        prices[pair] = { price: c.price, change5m: (c.change5m * 100).toFixed(2) + '%', high5m: c.high5m, low5m: c.low5m };
+      }
     }
     return prices;
   }
 
   return {
     priceCache,
-    connectOKXWebSocket,
+    feedTick,
     getPriceData,
     setAnomalyHandler,
     setOnCandleClose,
     getCandleBucket,
     get candleBuffer() { return candleBuffer; },
-    get wsConnected() { return wsConnected; },
+    get wsConnected() { return _connected; },
   };
 }

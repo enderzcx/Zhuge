@@ -135,8 +135,9 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
         if (text === 'pong') return;
         const msg = JSON.parse(text);
         if (msg.event === 'subscribe') return;
-        if (msg.data && msg.arg?.channel?.startsWith('candle')) {
-          _handleKlineData(msg);
+        if (msg.data && msg.arg?.channel) {
+          if (msg.arg.channel.startsWith('candle')) _handleKlineData(msg);
+          else if (msg.arg.channel === 'ticker') _handleTickerData(msg);
         }
       } catch (e) {
         _log.error('kline_ws_parse_error', { module: 'kline', error: e.message });
@@ -170,11 +171,14 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
 
   function _wsSubscribe(pair) {
     if (wsSubscribed.has(pair) || !_wsConnected) return;
-    // Bitget public kline channel: instId format = BTCUSDT (no dash)
     const instId = pair.replace('-', '');
+    // Subscribe to both candle5m (K-line) and ticker (real-time price) channels
     _ws.send(JSON.stringify({
       op: 'subscribe',
-      args: [{ instType: 'USDT-FUTURES', channel: 'candle5m', instId }],
+      args: [
+        { instType: 'USDT-FUTURES', channel: 'candle5m', instId },
+        { instType: 'USDT-FUTURES', channel: 'ticker', instId },
+      ],
     }));
     wsSubscribed.add(pair);
   }
@@ -184,9 +188,30 @@ export function createKlineMonitor({ db, priceStream, pipeline, messageBus, conf
     const instId = pair.replace('-', '');
     _ws.send(JSON.stringify({
       op: 'unsubscribe',
-      args: [{ instType: 'USDT-FUTURES', channel: 'candle5m', instId }],
+      args: [
+        { instType: 'USDT-FUTURES', channel: 'candle5m', instId },
+        { instType: 'USDT-FUTURES', channel: 'ticker', instId },
+      ],
     }));
     wsSubscribed.delete(pair);
+  }
+
+  /**
+   * Handle incoming ticker data from Bitget WS.
+   * Feed real-time price to priceStream for anomaly detection + price cache.
+   * Bitget ticker: { instId, lastPr, ts, ... }
+   */
+  function _handleTickerData(msg) {
+    for (const tick of msg.data) {
+      const instId = tick.instId || msg.arg?.instId;
+      if (!instId) continue;
+      const pair = instId.replace('USDT', '-USDT');
+      const price = parseFloat(tick.lastPr || tick.last || '0');
+      const ts = parseInt(tick.ts) || Date.now();
+      if (price > 0) {
+        priceStream.feedTick(pair, price, ts);
+      }
+    }
   }
 
   /**

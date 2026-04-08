@@ -289,7 +289,7 @@ app.listen(config.PORT, () => {
     }, interval);
   }
   scheduleTradeSync();
-  priceStream.connectOKXWebSocket();
+  // OKX WebSocket removed — price ticks now come from Bitget public WS via kline-monitor
 
   // Start TG bot
   if (config.TG_BOT_TOKEN) {
