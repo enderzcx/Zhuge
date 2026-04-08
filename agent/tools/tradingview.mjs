@@ -190,35 +190,8 @@ const TOOL_DEFS = [
     },
     requiresConfirmation: false,
   },
-  {
-    name: 'tv_backtest',
-    description: 'TradingView 策略回测 — 支持 rsi/bollinger/macd/ema_cross/supertrend/donchian 六种策略',
-    parameters: {
-      type: 'object',
-      properties: {
-        symbol: { type: 'string', description: '标的 (如 BTCUSDT)' },
-        strategy: { type: 'string', description: '策略: rsi/bollinger/macd/ema_cross/supertrend/donchian' },
-        period: { type: 'string', description: '回测周期 (默认 1y)' },
-        interval: { type: 'string', description: 'K线周期 (默认 1d)' },
-      },
-      required: ['symbol', 'strategy'],
-    },
-    requiresConfirmation: false,
-  },
-  {
-    name: 'tv_compare_strategies',
-    description: 'TradingView 6策略对比 — 同一标的跑全部策略返回排行榜',
-    parameters: {
-      type: 'object',
-      properties: {
-        symbol: { type: 'string', description: '标的 (如 BTCUSDT)' },
-        period: { type: 'string', description: '回测周期 (默认 1y)' },
-        interval: { type: 'string', description: 'K线周期 (默认 1d)' },
-      },
-      required: ['symbol'],
-    },
-    requiresConfirmation: false,
-  },
+  // tv_backtest and tv_compare_strategies removed — VPS can't reach Yahoo Finance,
+  // and 诸葛 has its own deterministic backtest system (backtest/engine.mjs) which is better.
   {
     name: 'tv_sentiment',
     description: 'Reddit 市场情绪分析 — 指定标的的社区情绪 (看多/看空/中性)',
@@ -259,8 +232,7 @@ const TOOL_MAP = {
   tv_volume_breakout:    { mcpName: 'volume_breakout_scanner',    transform: a => ({ exchange: a.exchange ?? 'BINANCE', timeframe: a.timeframe ?? '15m', volume_multiplier: a.volume_multiplier ?? 2.0, price_change_min: a.price_change_min ?? 3.0, limit: a.limit ?? 25 }) },
   tv_smart_volume:       { mcpName: 'smart_volume_scanner',       transform: a => ({ exchange: a.exchange ?? 'BINANCE', min_volume_ratio: a.min_volume_ratio ?? 2.0, min_price_change: a.min_price_change ?? 2.0, rsi_range: a.rsi_range ?? 'any', limit: a.limit ?? 20 }) },
   tv_bollinger_scan:     { mcpName: 'bollinger_scan',             transform: a => ({ exchange: a.exchange ?? 'BINANCE', timeframe: a.timeframe ?? '4h', bbw_threshold: a.bbw_threshold ?? 0.04, limit: a.limit ?? 50 }) },
-  tv_backtest:           { mcpName: 'backtest_strategy',          transform: a => ({ symbol: a.symbol, strategy: a.strategy, period: a.period ?? '1y', interval: a.interval ?? '1d' }) },
-  tv_compare_strategies: { mcpName: 'compare_strategies',         transform: a => ({ symbol: a.symbol, period: a.period ?? '1y', interval: a.interval ?? '1d' }) },
+  // tv_backtest / tv_compare_strategies removed (Yahoo Finance blocked on VPS)
   tv_sentiment:          { mcpName: 'market_sentiment',           transform: a => ({ symbol: a.symbol, category: a.category ?? 'all', limit: a.limit ?? 20 }) },
   tv_news:               { mcpName: 'financial_news',             transform: a => ({ symbol: a.symbol, category: a.category ?? 'crypto', limit: a.limit ?? 10 }) },
 };
