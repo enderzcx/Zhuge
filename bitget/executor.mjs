@@ -764,7 +764,9 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
       // Calculate sizes
       const maxKelly = _calcMaxKellySize(available, symbol);
-      const scoutSize = Math.max(0.01, _calcLevelSize(0, maxKelly));
+      // Min size depends on symbol: BTC needs 0.001, most alts need 0.01+
+      const minSize = symbol.startsWith('BTC') ? 0.001 : 0.01;
+      const scoutSize = Math.max(minSize, _calcLevelSize(0, maxKelly));
       const sizeStr = String(scoutSize);
 
       // Set leverage
@@ -857,7 +859,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
     try {
       const nextLevel = group.current_level + 1;
-      const size = Math.max(0.01, _calcLevelSize(nextLevel, group.max_kelly_size));
+      const minSize = group.symbol.startsWith('BTC') ? 0.001 : 0.01;
+      const size = Math.max(minSize, _calcLevelSize(nextLevel, group.max_kelly_size));
       const sizeStr = String(size);
       const side = group.side === 'long' ? 'buy' : 'sell';
       const holdSide = group.side;
