@@ -2,14 +2,14 @@
 
 # 诸葛 Zhuge
 
-**Self-hosted autonomous AI trading system with 7 collaborative agents.**
+**Self-hosted autonomous AI trading system with real-time K-line monitoring, Wei strategy framework, and multi-agent pipeline.**
 
 *Observe. Plan. Act. Evolve.*
 
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![SQLite](https://img.shields.io/badge/SQLite-22_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-30%2B_tables-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Bitget](https://img.shields.io/badge/Bitget-USDT_Futures-00D084)](https://www.bitget.com/)
-[![Tests](https://img.shields.io/badge/tests-63_passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-66_passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
 [English] [[简体中文](README_CN.md)]
@@ -18,7 +18,7 @@
 
 ---
 
-Zhuge is a **7-agent autonomous trading system** that runs 24/7 on a single VPS. It analyzes 540+ crypto futures markets, makes trade decisions through a multi-agent pipeline, executes on Bitget with Kelly-criterion sizing, and continuously evolves its own trading knowledge — all without human intervention.
+Zhuge is an **autonomous trading system** that runs 24/7 on a single VPS. It monitors crypto markets in real-time via Bitget WebSocket, analyzes with a multi-agent pipeline, executes with Kelly-criterion sizing, and continuously evolves its own trading strategies — all without human intervention.
 
 Not a chatbot wrapper. Not a backtesting framework. A self-improving trading machine that uses real money.
 
@@ -33,55 +33,133 @@ Most "AI trading bots" are either:
 
 | | Typical Bot | Zhuge |
 |---|---|---|
-| Decision making | Single LLM call | 7 agents with distinct roles |
-| Risk management | Fixed stop-loss | Fail-closed risk gate + Kelly sizing + 4-level scaling |
+| Market data | REST polling every N min | Bitget WebSocket: real-time ticker + 5m/15m/1h K-line with indicator computation |
+| Decision making | Single LLM call | Multi-agent pipeline: Analyst → Risk → Strategist → Executor |
+| Risk management | Fixed stop-loss | Fail-closed risk gate + Kelly sizing + 4-level scaling + time stops |
+| Strategy | Hardcoded rules | Wei framework: probe/skill/defensive with target-position + ladder execution |
 | Learning | None | Three-layer knowledge: expert RAG + self-discovered rules + real-time intel |
-| Data sources | Single news API | 12 TG channels + Twitter KOL search + 27-source OSINT + Fear & Greed |
-| Execution | REST polling every N min | WebSocket event-driven (fills in <1s) |
-| Strategy | Hardcoded | AI-generated, auto-backtested, lifecycle-managed |
-| Memory | Stateless | Dream Worker checks every 2h, runs at most every 6h when enough notes exist |
-| Backtest | LLM-in-the-loop (slow, non-reproducible) | Deterministic condition evaluator (fast, reproducible) |
+| Data sources | Single news API | 12 TG channels + Twitter + 27-source OSINT + TradingView MCP + Fear & Greed |
+| Execution | REST polling | WebSocket event-driven (fills in <1s) |
+| Backtest | LLM-in-the-loop (slow) | Deterministic condition evaluator + ladder simulation + time-stop enforcement |
+| Memory | Stateless | Dream Worker consolidation + operational context + long-term recall |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    PIPELINE (AI-driven scheduling)           │
-│                                                              │
-│   Crucix 27-source    OKX WebSocket    Intel Stream           │
-│        OSINT              prices       (TG + APIs + X)       │
-│          │                  │                 │               │
-│          └──────────┬───────┘─────────────────┘               │
-│                     ▼                                         │
-│          ┌─────────────────────┐                              │
-│          │   Analyst Agent     │  9 tools, AI chooses which   │
-│          │   submit_analysis() │  structured output via fn    │
-│          └────────┬────────────┘                              │
-│                   ▼                                           │
-│          ┌─────────────────────┐                              │
-│          │    Risk Agent       │  Hard rules (code-level)     │
-│          │   submit_verdict()  │  + LLM soft evaluation       │
-│          │   equity from WS    │  Fail-closed: VETO default   │
-│          └────────┬────────────┘                              │
-│                   ▼                                           │
-│          ┌─────────────────────┐                              │
-│          │    Executor         │  Kelly sizing (half-Kelly)   │
-│          │   4-level scaling   │  1:1:2:4 pyramid             │
-│          │   WS event-driven   │  fills → DB in <1s           │
-│          └─────────────────────┘                              │
-│                                                              │
-│   Scanner ─── 540+ pairs ─── Researcher ─── Momentum trade   │
-│                                                              │
-│   Compound ── review trades ── generate rules ── evolve      │
-│   Dream Worker ── merge/prune/distill memories (checks 2h, runs ≤6h)      │
-│   Reviewer ── signal accuracy ── lesson extraction            │
-│   Strategist ── evaluate AI-generated strategies              │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                         DATA LAYER                               │
+│                                                                  │
+│   Bitget Public WS          Bitget Private WS     Crucix OSINT   │
+│   ├─ ticker (real-time)     ├─ orders (fills)     27 sources     │
+│   ├─ candle5m (K-line)      ├─ positions          Intel Stream   │
+│   └─ dynamic subscribe      └─ account (equity)   12 TG channels │
+│          │                         │                    │        │
+│   K-line Monitor ◄────────────────┘                    │        │
+│   ├─ 5m/15m/1h indicators                              │        │
+│   ├─ Signal detection (EMA/MACD/RSI/BB/Volume)         │        │
+│   └─ Pipeline trigger on signal ──────────────┐        │        │
+│                                                │        │        │
+├────────────────────────────────────────────────▼────────▼────────┤
+│                      ANALYSIS PIPELINE                           │
+│                                                                  │
+│   ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐    │
+│   │   Analyst     │──▶│  Risk Agent  │──▶│   Strategist     │    │
+│   │  9 tools      │   │  fail-closed │   │  Wei strategies  │    │
+│   │  structured   │   │  hard+soft   │   │  conditions eval │    │
+│   │  output       │   │  rules       │   │  target-position │    │
+│   └──────────────┘   └──────────────┘   └────────┬─────────┘    │
+│                                                   │              │
+│   Scanner ─── 540+ pairs ─── Researcher ─── Momentum trade      │
+│                                                   │              │
+├───────────────────────────────────────────────────▼──────────────┤
+│                      EXECUTION LAYER                             │
+│                                                                  │
+│   Executor: Kelly sizing → 4-level scaling (1:1:2:4)             │
+│   Wei1.0: trigger mode (open/close)                              │
+│   Wei2.0: target-position + ladder orders + time stops           │
+│   WS fills → DB in <1s → reviewer triggered                     │
+│                                                                  │
+├──────────────────────────────────────────────────────────────────┤
+│                      EVOLUTION LAYER                             │
+│                                                                  │
+│   Compound ── review trades ── generate rules ── evolve          │
+│   Dream Worker ── merge/prune/distill memories (checks 2h)      │
+│   Reviewer ── signal accuracy ── lesson extraction               │
+│   Strategy Selector ── wei family lifecycle management           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Three-Layer Knowledge Architecture
+## Wei Strategy Framework
 
-What makes Zhuge actually learn, not just execute:
+Based on the coolish BTC trading theory — not a pixel-perfect copy, but a translation into what the engine can express, backtest, and iterate on.
+
+### Wei1.0 (Trigger Mode)
+
+Three BTC-only strategies that fire discrete open/close signals:
+
+| Strategy | Role | Direction | Leverage | TP / SL |
+|----------|------|-----------|----------|---------|
+| `wei1_probe_long` | Scout / Normal attack | Long | 2x | 5% / 2% |
+| `wei1_skill_add_long` | Size-up / Skill shot | Long | 4x | 7% / 1.8% |
+| `wei1_defensive_short` | Defensive hedge | Short | 3x | 6% / 2% |
+
+### Wei2.0 (Target Position Mode)
+
+Three strategies that output target exposure percentages, executed via ladder orders:
+
+| Strategy | Target Exposure | Max Hold | Ladder |
+|----------|----------------|----------|--------|
+| `wei2_probe_long` | 15% of equity | 48h | 3 rungs |
+| `wei2_skill_add_long` | 45% of equity | 24h | 3 rungs |
+| `wei2_defensive_short` | -20% of equity | 36h | 3 rungs |
+
+Plus 3 dynamic rules that adjust parameters based on market conditions:
+- **Compression**: BBW < 5% + ADX < 20 → reduce target, cap leverage at 2x
+- **Breakout**: Aligned bullish structure → increase target +10%, allow leverage 5x
+- **Overheat**: Elevated funding + heavy overhead supply → trim target -10%
+
+See [docs/strategies/coolish-btc-framework.md](docs/strategies/coolish-btc-framework.md) for the full theory-to-implementation mapping.
+
+## Real-Time K-line Monitor
+
+All market data flows through a single Bitget Public WebSocket:
+
+```
+Bitget Public WS (candle5m + ticker)
+    │
+    ├─ BTC-USDT / ETH-USDT / SOL-USDT (always on)
+    ├─ + any pair via kline_subscribe tool (dynamic)
+    │
+    ▼
+K-line Monitor
+    ├─ 5m candle close → compute indicators (RSI, EMA, MACD, BB, OBV, ADX...)
+    ├─ Aggregate 5m → 15m → 1h in memory
+    ├─ Signal detection: EMA cross, MACD cross, RSI extreme, BB squeeze/breakout, volume spike
+    ├─ Snapshot every 60s: early warning on live candle (no trading)
+    └─ Signal → trigger full pipeline analysis → may open trade
+    
+Ticker data → priceCache → anomaly detection (2%/5% flash alerts)
+```
+
+诸葛 can dynamically subscribe to any coin via the `kline_subscribe` tool. New subscriptions automatically:
+1. Fetch 200 historical candles from Bitget REST API
+2. Compute initial indicators across all timeframes
+3. Start receiving live WebSocket updates
+
+## TradingView MCP Integration
+
+10 tools from a local TradingView MCP server for cross-validation:
+
+- `tv_market_snapshot` — Global overview (crypto + indices + FX + commodities)
+- `tv_coin_analysis` — 30+ indicators per symbol
+- `tv_multi_timeframe` — Weekly → Daily → 4H → 1H → 15m alignment
+- `tv_top_gainers / tv_top_losers` — Market movers
+- `tv_volume_breakout / tv_smart_volume` — Volume analysis
+- `tv_bollinger_scan` — BB squeeze detection
+- `tv_sentiment` — Reddit community sentiment
+- `tv_news` — Reuters, CoinDesk, CoinTelegraph aggregation
+
+## Three-Layer Knowledge Architecture
 
 ```
 Layer 1: Expert Knowledge (RAG)
@@ -93,58 +171,18 @@ Layer 2: Self-Discovered Knowledge (Compound)
 │  LLM reviews trade history + veto patterns + signal accuracy
 │  → auto-generates rules with confidence + evidence
 │  → rules directly control execution params (leverage, TP/SL, margin)
-│  → new strategies: proposed → backtest → active → retired
+│  → strategy lifecycle: proposed → backtest → active → retired
 │
 Layer 3: Real-Time Intelligence (Intel Stream)
 │  12 TG channels (GramJS, 2min poll) — crypto + energy
 │  OpenTwitter API — KOL tweets, keyword search, listing alerts
-│  Crucix 27-source OSINT + OKX prices
+│  Crucix 27-source OSINT + Bitget WebSocket prices
 │  Fear & Greed Index + daily-news aggregator
 │
 └─ Feedback Loop:
    Layer 1 → influences trades → results feed Layer 2
    → Layer 2 validates Layer 1 effectiveness → evolves
 ```
-
-## Event-Driven Execution
-
-Primary execution path is event-driven via Bitget Private WebSocket:
-
-```
-Order fill     → WS orders channel     → entry/exit price + PnL → reviewer triggered
-Position gone  → WS positions channel  → fallback close detection (marks 'closing')
-Balance change → WS account channel    → equity cached → risk agent reads from cache
-
-REST sync runs adaptively: 30min when WS is healthy, 5min when it's not.
-Analysis loop and WS reconnection still use timers — "event-driven" applies to trade execution, not the whole system.
-```
-
-## Intel Stream
-
-Real-time market intelligence from multiple sources, unified into a single feed:
-
-```
-TG Channels (GramJS, 2min poll)          Low-freq APIs (6h)
-├─ Whale Alert (whale transfers)          ├─ daily-news (6551.io)
-├─ Binance Killers (signals)              └─ Fear & Greed Index
-├─ Cointelegraph (breaking news)
-├─ CryptoNinjas (trade signals)          Agent Tools (on-demand)
-├─ Glassnode (on-chain data)              ├─ search_twitter (keyword)
-├─ Oil Trading (energy)                   ├─ get_kol_tweets (KOL feed)
-├─ Energy Today                           ├─ get_listing_news (exchange)
-└─ + 5 more channels                     └─ get_onchain_signals (whale)
-         │                                          │
-         └─────────────┬───────────────────────────┘
-                       ▼
-             Intel EventBus
-             hash dedup → impact score (0-100) → route
-             ≥80: instant analysis trigger
-             all: cached for Analyst consumption
-```
-
-Each incoming item is deduplicated (MD5), scored by keyword rules (no LLM cost), and routed:
-- Score ≥80 triggers an instant analysis cycle (same mechanism as price anomaly detection)
-- All items are cached and available to the Analyst via `get_intel_feed` and `fetch_news` tools
 
 ## Risk Controls
 
@@ -153,27 +191,30 @@ Zhuge is paranoid by design. Every trade passes through multiple safety gates:
 - **Fail-closed risk gate:** Unknown state → VETO. Equity fetch fails → VETO. Parse error → VETO.
 - **24h loss limit:** Realized + unrealized > 5% of equity → all trading halted
 - **Consecutive loss cooldown:** 3+ losses (5 in scaling mode) → 1h mandatory cooldown
-- **Kelly criterion sizing:** Half-Kelly capped at 25% of available margin
+- **Scout relaxation:** Scout (smallest) positions bypass loss cooldown — worth trying even after losses
+- **Kelly criterion sizing:** Half-Kelly capped at 25% of available margin, $5 notional minimum
 - **4-level graduated scaling:** Scout small, scale only with increasing confidence + price confirmation
-- **Strategy gate:** New strategies auto-backtest 14 days on creation; win rate <20% → retired immediately
-- **Deterministic backtest:** New strategies auto-backtest 14 days on creation, <20% win rate → retired
+- **Time stops:** `max_hold_minutes` enforced — positions expire if thesis doesn't play out
+- **Strategy gate:** New strategies auto-backtest 14 days; win rate <20% → retired immediately
+- **Credential isolation:** exec_shell blocked from reading .env and sensitive files
+- **Conversation sanitization:** Dangling tool calls auto-cleaned to prevent LLM 400 errors
 
 ## Tech Stack
 
 | Component | Choice | Why |
 |-----------|--------|-----|
-| Runtime | Node.js (ESM) | Single-threaded event loop fits trading pipeline |
-| Database | SQLite (WAL mode) | 23 tables, zero ops, single-file backup |
+| Runtime | Node.js 20+ (ESM) | Single-threaded event loop fits trading pipeline |
+| Database | SQLite (WAL mode) | 30+ tables, zero ops, single-file backup |
 | Vector DB | LanceDB + Ollama | Local embedding, no API costs, 110ms search |
 | LLM | OpenAI-compatible API | Per-agent model selection, fallback chain |
-| Exchange | Bitget (Private WebSocket) | Event-driven fills, 540+ futures pairs |
-| Intel | Intel Stream (TG + OpenTwitter + APIs) | 12 TG channels real-time + Twitter KOL search + Fear & Greed |
+| Exchange | Bitget (Public + Private WS) | Real-time K-line + event-driven fills, 540+ futures |
+| Market Data | Bitget Public WebSocket | Unified source: ticker + candle5m, dynamic subscription |
+| TradingView | Local MCP server (streamable-http) | 10 tools for cross-validation, no API key needed |
+| Intel | Intel Stream (TG + OpenTwitter + APIs) | 12 TG channels + Twitter KOL + Fear & Greed |
 | Data | Crucix (27 sources) | Macro + geopolitical + energy in one call |
-| Tracing | OpenTelemetry → Jaeger | 3-layer span model for full pipeline visibility |
+| Tracing | OpenTelemetry → Jaeger | 3-layer span model: pipeline → agent → tool |
 | Interface | Telegram Bot | Streaming responses, confirmation keyboards, supergroup dashboard |
-| Tests | Vitest | 63 cases: indicators, Kelly math, scaling, signals, memory |
-| Twitter | OpenTwitter API (ai.6551.io) | KOL monitoring, search, listing alerts — no API key needed |
-| TG Monitor | GramJS (MTProto) | 12 public channels: crypto + oil/energy, 2min poll |
+| Tests | Vitest | 66 cases: indicators, Kelly math, scaling, signals, strategies, features |
 
 ## Quick Start
 
@@ -191,64 +232,72 @@ node index.mjs
 - Node.js 20+
 - Ollama with `nomic-embed-text` model (for RAG knowledge search)
 - Bitget API key with USDT-FUTURES permission
-- OpenAI-compatible LLM endpoint (tested with gpt-4o-mini, gpt-5.4-mini)
+- OpenAI-compatible LLM endpoint (tested with gpt-5.4-mini)
 - (Optional) Telegram bot token for dashboard + natural language commands
+- (Optional) TradingView MCP server for cross-validation tools
 
 ## Project Structure
 
 ```
 ├── index.mjs              — entry point, module wiring
 ├── pipeline.mjs           — collect → analyze → trade loop
-├── config.mjs / db.mjs    — configuration + 22-table SQLite schema
+├── config.mjs / db.mjs    — configuration + 30-table SQLite schema
 │
 ├── agent/                 — TG Agent (诸葛) harness
-│   ├── cognition/         — compound review, dream worker, condition evaluator
+│   ├── cognition/         — strategy selector, target-position engine,
+│   │                        feature builder, conditions evaluator,
+│   │                        compound review, dream worker
 │   ├── knowledge/         — RAG (LanceDB + Ollama)
 │   ├── memory/            — indexed recall with frontmatter metadata
-│   ├── tools/             — 44 tools (data, system, trade, memory, twitter, intel)
+│   ├── tools/             — data, system, trade, memory, schedule, tradingview
 │   ├── push/              — smart push engine + TG dashboard
+│   ├── telegram/          — streaming editMessage + confirmation UI
 │   └── observe/           — metrics, logger, health, OTel tracing
 │
-├── agents/                — 6 autonomous sub-agents
+├── agents/                — pipeline sub-agents
 │   ├── analyst.mjs        — 9 tools + submit_analysis (structured output)
-│   ├── risk.mjs           — fail-closed gate + submit_verdict
+│   ├── risk.mjs           — fail-closed gate + submit_verdict (scout relaxation)
 │   ├── researcher.mjs     — coin momentum scoring (4 dimensions)
-│   ├── strategist.mjs     — AI strategy evaluation
+│   ├── strategist.mjs     — Wei strategy evaluation + target-position decisions
 │   ├── reviewer.mjs       — lesson extraction + signal accuracy
 │   └── runner.mjs         — generic agent loop with tool calling
 │
 ├── bitget/                — exchange integration
 │   ├── ws.mjs             — Private WebSocket (orders/positions/account)
 │   ├── client.mjs         — REST API + signing + rate-limit backoff
-│   └── executor.mjs       — Kelly sizing, 4-level scaling, WS handlers
-│
-├── integrations/          — external data sources
-│   ├── intel.mjs          — Intel Stream: TG channels (GramJS) + API pollers
-│   ├── data-sources.mjs   — Crucix OSINT + news fetch (backed by Intel cache)
-│   └── telegram.mjs       — TG alert sender
+│   └── executor.mjs       — Kelly sizing, 4-level scaling, target reconciliation,
+│                            ladder orders, WS event handlers
 │
 ├── market/                — market data
-│   ├── prices.mjs         — OKX WebSocket + anomaly detection
-│   ├── scanner.mjs        — 540+ futures scanner
-│   └── indicators.mjs     — RSI, EMA, MACD, ATR, Bollinger, Fib (pure math)
+│   ├── kline-monitor.mjs  — Bitget Public WS: candle5m + ticker subscription,
+│   │                        5m/15m/1h indicator computation, signal detection
+│   ├── prices.mjs         — price cache + anomaly detection (fed by kline-monitor)
+│   ├── scanner.mjs        — 540+ futures scanner + momentum pipeline
+│   └── indicators.mjs     — 30+ indicators: RSI, EMA, MACD, ATR, BB, Fib,
+│                            Ichimoku, ADX, OBV, VWAP, Market Structure, OB, FVG
 │
 ├── backtest/              — deterministic backtest engine
-│   ├── engine.mjs         — candle replay + condition evaluation
-│   └── simulator.mjs      — position management + PnL calculation
+│   ├── engine.mjs         — candle replay + condition eval + ladder simulation
+│   ├── simulator.mjs      — position management + PnL calculation
+│   └── market-state-loader.mjs — Bitget market state snapshots for backtest
 │
-└── tests/                 — 63 unit tests (vitest)
+├── docs/
+│   ├── strategies/        — coolish BTC framework spec
+│   └── architecture/      — refactor plan (codex-reviewed)
+│
+└── tests/                 — 66 unit tests (vitest)
 ```
 
 ## Design Decisions
 
-Some non-obvious choices and why:
-
-- **No LLM in backtest.** LLM output is non-deterministic → backtest results aren't reproducible. Zhuge uses a pure `conditions.mjs` evaluator that's fast and consistent.
-- **Structured output via function calls.** Instead of asking LLMs to output JSON text (which fails ~5% of the time), agents call `submit_analysis()` / `submit_verdict()` tools. The schema is enforced by the function definition.
-- **Dream Worker limits.** Max 3 deletes + 3 merges + 2 creates per run. Without this, LLM hallucinations can wipe the entire memory in one bad cycle.
-- **Strategy lifecycle.** `proposed → active → retired`. High-confidence strategies activate immediately; others stay `proposed` until the next compound review promotes them. All new strategies are auto-backtested on creation — win rate <20% gets retired.
-- **WebSocket-first, REST-fallback.** Event-driven execution eliminates the 5-minute blind spot where positions could close without detection. REST polls adaptively: 30min when WS is healthy, 5min when it's not.
-- **Pessimistic backtest.** For long positions, check low (stop-loss) before high (take-profit) on each candle. This prevents systematic optimistic bias in backtest results.
+- **No LLM in backtest.** LLM output is non-deterministic → backtest results aren't reproducible. Zhuge uses a pure `conditions.mjs` evaluator.
+- **Structured output via function calls.** Agents call `submit_analysis()` / `submit_verdict()` instead of outputting JSON text. Schema enforced by tool definition.
+- **Dream Worker limits.** Max 3 deletes + 3 merges + 2 creates per run. Prevents LLM hallucinations from wiping memory.
+- **Wei strategy framework.** Not a single mega-strategy. Three sub-strategies (probe/skill/defensive) with independent sizing, lifecycle, and conditions. Compound evolves parameters, not the structure.
+- **Bitget-unified data.** All market data from one exchange: ticker + K-line + private events. No OKX/Bitget split — eliminates price divergence and reduces connection count.
+- **Signal detection: rules + AI.** Hardcoded signals (EMA cross, etc.) are fast, deterministic triggers. AI (analyst) makes the actual trading decision. Best of both worlds.
+- **Pessimistic backtest.** For long positions, check low (stop-loss) before high (take-profit) on each candle.
+- **Conversation sanitization.** Auto-remove dangling tool calls from history to prevent LLM API 400 errors on crash recovery.
 
 ## License
 
