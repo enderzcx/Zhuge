@@ -785,8 +785,8 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
       });
 
       const orderId = order?.orderId;
-      const price = _getSymbolPrice(symbol);
-      const stopLoss = _calcStopLoss(holdSide, price, 0);
+      const fillPrice = _getSymbolPrice(symbol);
+      const stopLoss = _calcStopLoss(holdSide, fillPrice, 0);
       const tp = signal.take_profit || null;
 
       _log.info('scout_opened', { module: 'scout', level: 0, holdSide, size: sizeStr, symbol, orderId, stopLoss });
@@ -799,11 +799,11 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
         JSON.stringify(signal), `scout L0 ${action} conf:${signal.confidence}`, new Date().toISOString());
 
       // Create position group
-      const groupResult = insertPositionGroup.run(symbol, holdSide, price, scoutSize, maxKelly, stopLoss, tp);
+      const groupResult = insertPositionGroup.run(symbol, holdSide, fillPrice, scoutSize, maxKelly, stopLoss, tp);
       const groupId = groupResult.lastInsertRowid;
 
       // Record level
-      insertPositionLevel.run(groupId, 0, tradeId, orderId, scoutSize, price, signal.confidence, action);
+      insertPositionLevel.run(groupId, 0, tradeId, orderId, scoutSize, fillPrice, signal.confidence, action);
 
       insertDecision.run(new Date().toISOString(), 'executor', 'scout_open', 'place-order',
         JSON.stringify({ symbol, side, size: sizeStr, leverage, level: 0 }),
