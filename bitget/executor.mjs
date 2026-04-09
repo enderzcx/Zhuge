@@ -762,12 +762,16 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
         }
       } catch (e) { _log.warn('position_check_failed', { module: 'scout', error: e.message }); }
 
-      // Calculate sizes
+      // Calculate sizes — ensure minimum notional value of $5 (Bitget requirement)
       const maxKelly = _calcMaxKellySize(available, symbol);
-      // Min size depends on symbol: BTC needs 0.001, most alts need 0.01+
-      const minSize = symbol.startsWith('BTC') ? 0.001 : 0.01;
-      const scoutSize = Math.max(minSize, _calcLevelSize(0, maxKelly));
-      const sizeStr = String(scoutSize);
+      const price = _getSymbolPrice(symbol);
+      const minNotional = 5; // Bitget minTradeUSDT = $5 for all USDT futures
+      const minSizeByNotional = price > 0 ? minNotional / price : 0.01;
+      // Round up to sizeMultiplier (0.0001 for BTC, 0.01 for ETH, 0.1 for SOL, etc.)
+      const kellySize = _calcLevelSize(0, maxKelly);
+      const scoutSize = Math.max(minSizeByNotional, kellySize);
+      // Round to 4 decimal places to avoid Bitget precision errors
+      const sizeStr = String(parseFloat(scoutSize.toFixed(4)));
 
       // Set leverage
       await bitgetRequest('POST', '/api/v2/mix/account/set-leverage', {
@@ -859,8 +863,9 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
     try {
       const nextLevel = group.current_level + 1;
-      const minSize = group.symbol.startsWith('BTC') ? 0.001 : 0.01;
-      const size = Math.max(minSize, _calcLevelSize(nextLevel, group.max_kelly_size));
+      const price = _getSymbolPrice(group.symbol);
+      const minSizeByNotional = price > 0 ? 5 / price : 0.01;
+      const size = Math.max(minSizeByNotional, _calcLevelSize(nextLevel, group.max_kelly_size));
       const sizeStr = String(size);
       const side = group.side === 'long' ? 'buy' : 'sell';
       const holdSide = group.side;
