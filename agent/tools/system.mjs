@@ -7,7 +7,8 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 
 const SHELL_TIMEOUT = 30000;
-const SAFE_COMMANDS = /^(ls|cat|head|tail|df|free|ps|pm2 list|pm2 logs|git log|git status|wc|du|uptime|whoami|date|pwd|echo)/;
+const SAFE_COMMANDS = /^(ls|head|tail|df|free|ps|pm2 list|pm2 logs|git log|git status|wc|du|uptime|whoami|date|pwd|echo)/;
+const BLOCKED_PATHS = /\.(env|pem|key|secret|credentials|vault)|\/\.ssh\//i;
 
 export function createSystemTools({ log }) {
   const _log = log || { info() {}, warn() {}, error() {} };
@@ -85,6 +86,7 @@ export function createSystemTools({ log }) {
   const EXECUTORS = {
     async exec_shell({ cmd }) {
       if (!cmd) return '{ "error": "cmd is required" }';
+      if (BLOCKED_PATHS.test(cmd)) return '{ "error": "Blocked: command references sensitive file path" }';
       _log.info('exec_shell', { module: 'tools', cmd: cmd.slice(0, 100) });
       try {
         const output = execSync(cmd, {
@@ -99,6 +101,7 @@ export function createSystemTools({ log }) {
     },
 
     async read_file({ path, lines }) {
+      if (BLOCKED_PATHS.test(path)) return 'Error: Blocked — sensitive file path';
       if (!existsSync(path)) return `Error: File not found: ${path}`;
       try {
         let content = readFileSync(path, 'utf-8');
