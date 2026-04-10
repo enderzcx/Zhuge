@@ -243,8 +243,8 @@ priceStream.setAnomalyHandler((anomaly) => {
 });
 
 // --- Start ---
-app.listen(config.PORT, () => {
-  log.info('server_started', { module: 'index', port: config.PORT, model: config.LLM_MODEL, interval: '30min' });
+app.listen(config.PORT, '127.0.0.1', () => {
+  log.info('server_started', { module: 'index', port: config.PORT, host: '127.0.0.1', model: config.LLM_MODEL, interval: '30min' });
   // AI-driven scheduling: analyst decides next_check_in after each analysis
   async function runAnalysisLoop() {
     try {
