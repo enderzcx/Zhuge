@@ -11,7 +11,12 @@
  * Otherwise → posts to TG_CHAT_ID (owner DM).
  */
 
-const POSITIONS_INTERVAL = 5 * 60 * 1000;  // 5 min
+// 30 min (was 5 min). Reduced at owner's explicit request after moving the
+// dashboard target to a topic-based supergroup where 5-minute cadence was
+// too noisy for community members. Same cadence applies to owner-DM mode
+// — the owner doesn't need a fresh snapshot every 5 minutes when they can
+// query the agent directly; 30-minute ambient visibility is sufficient.
+const POSITIONS_INTERVAL = 30 * 60 * 1000;
 const OBSERVE_INTERVAL = 2 * 60 * 60 * 1000; // 2h
 const CHART_INTERVAL = 6 * 60 * 60 * 1000;  // 6 h
 
@@ -51,7 +56,7 @@ export function createDashboard({ config, db, tgCall, health, metrics, log, data
   async function _filterForTrading(items, type = 'urgent') {
     if (!llm || items.length === 0) return items;
     try {
-      const numbered = items.map((it, i) => `${i + 1}. ${(it.text || it.headline || '').slice(0, 150)}`).join('\n');
+      const numbered = items.map((it, i) => `${i + 1}. ${(it.text || it.headline || it.title || '').slice(0, 150)}`).join('\n');
       const result = await llm(
         [{ role: 'user', content: `你是交易员的信息过滤器。以下${items.length}条${type === 'urgent' ? '快讯' : '新闻'}，只保留对金融市场/交易影响最大的（如：战争影响油价、央行政策、大宗商品供应中断、地缘风险影响避险情绪、制裁影响供应链等）。
 
@@ -67,8 +72,19 @@ ${numbered}
         { max_tokens: 50, timeout: 10000 }
       );
       const answer = (result.content || result || '').trim();
+      // Explicit "nothing relevant" → real rejection, caller can trust
+      // `[]` as the final verdict and safely mark those items as seen.
       if (answer === 'none' || answer.toLowerCase().includes('none')) return [];
-      const keepIds = [...answer.matchAll(/\d+/g)].map(m => parseInt(m[0])).filter(n => n > 0 && n <= items.length);
+      const digitMatches = [...answer.matchAll(/\d+/g)];
+      // Malformed LLM reply (no digits at all): treat as pass-through so a
+      // transient formatting glitch doesn't permanently suppress a batch
+      // when the caller commits on `[]`. This preserves the existing
+      // fail-permissive behavior of the `catch` branch below.
+      if (digitMatches.length === 0) return items;
+      const keepIds = digitMatches.map(m => parseInt(m[0])).filter(n => n > 0 && n <= items.length);
+      // Reply had digits but none in range: also treat as malformed /
+      // pass-through for the same reason.
+      if (keepIds.length === 0) return items;
       return items.filter((_, i) => keepIds.includes(i + 1));
     } catch { return items; } // on error, pass through all
   }
@@ -120,6 +136,27 @@ ${numbered}
 
   // === Positions Post ===
 
+  /**
+   * Rollout / migration note (accepted residual risk):
+   *
+   * This function no longer pins the positions snapshot — pinning was
+   * unhelpful in forum topics with community members, and the 30-minute
+   * cadence doesn't need a pin to be findable.
+   *
+   * On deployments upgrading from the previous pin-and-edit behavior, the
+   * old pinned message will remain pinned until an operator manually
+   * unpins it once. We intentionally do NOT auto-unpin on first post
+   * because the only APIs that target the legacy pin without its
+   * message_id (`unpinAllForumTopicMessages`, `unpinChatMessage` with no
+   * id) are too broad and would also clear any unrelated message the
+   * owner pinned manually in the same chat/topic — a strictly worse
+   * regression than the stale-pin cosmetic issue itself.
+   *
+   * If this migration path ever becomes important in the future, the
+   * correct fix is to persist the pinned-message id to a state file when
+   * we pin it, and read it back on startup to issue a targeted unpin.
+   * Not worth the extra persistence layer today.
+   */
   async function postPositions() {
     try {
       const openTrades = stmts.openTrades.all();
@@ -138,7 +175,10 @@ ${numbered}
       text += `\n📈 总PnL: $${(stats.total_pnl || 0).toFixed(2)} | ${stats.total || 0}笔 | 胜率: ${winRate}%`;
       text += `\n🕐 ${new Date().toISOString().slice(11, 16)} UTC`;
 
-      // Edit pinned message or send new
+      // Edit the most recently-sent positions message to keep the topic tidy
+      // (single updating message instead of a flood). No pin — pinning a
+      // topic message is noisy for community members and the 30-min cadence
+      // makes pin unnecessary.
       if (pinnedPositionMsgId) {
         const ok = await _edit(pinnedPositionMsgId, text);
         if (!ok) pinnedPositionMsgId = null;
@@ -147,7 +187,6 @@ ${numbered}
         const res = await _send(text, 'positions');
         if (res?.result?.message_id) {
           pinnedPositionMsgId = res.result.message_id;
-          await _pin(pinnedPositionMsgId);
         }
       }
     } catch (err) {
@@ -297,7 +336,8 @@ ${numbered}
       const urgent = crucix?.tg?.urgent || [];
       if (urgent.length === 0) return;
 
-      // Dedup
+      // Dedup (unchanged from pre-v2; immediate commit so in-batch dupes
+      // within a single fetch are suppressed).
       const newItems = [];
       for (const item of urgent) {
         const hash = (item.channel || '') + ':' + (item.text || '').slice(0, 50);
@@ -331,6 +371,20 @@ ${numbered}
   // === News Digest — top headlines with URLs ===
 
   const NEWS_DIGEST_INTERVAL = 60 * 60 * 1000; // every 1h
+  // Digest-specific dedup cache, independent of urgent. Prevents the
+  // hourly digest from re-posting the same top headline every cycle
+  // while still letting urgent dedup run at its own cadence + cap.
+  const seenDigestUrls = new Set();
+  const SEEN_DIGEST_CAP = 300;
+  const SEEN_DIGEST_TRIM_TO = 150;
+
+  function _commitDigestUrls(urls) {
+    for (const u of urls) seenDigestUrls.add(u);
+    if (seenDigestUrls.size > SEEN_DIGEST_CAP) {
+      const victims = [...seenDigestUrls].slice(0, seenDigestUrls.size - SEEN_DIGEST_TRIM_TO);
+      victims.forEach(u => seenDigestUrls.delete(u));
+    }
+  }
 
   async function postNewsDigest() {
     if (!dataSources) return;
@@ -339,30 +393,81 @@ ${numbered}
       const feed = crucix?.newsFeed || [];
       if (feed.length === 0) return;
 
-      // Filter: has url + headline
-      const withUrl = feed.filter(n => n.url && (n.headline || n.title)).slice(0, 15);
+      // Require url + headline; dedup against seenDigestUrls BEFORE the
+      // 15-item LLM cap so fresh stories beyond the top of the feed still
+      // get a chance when the top is stable. Do not commit urls to the
+      // seen set until after _send() succeeds, so a transient API failure
+      // leaves the batch retry-eligible next hour. This is the primary
+      // fix for the "ugly repeated headlines" the user reported — the
+      // pre-v2 digest had no dedup at all and re-posted top-5 every run.
+      const withUrl = feed.filter(n => n.url && (n.headline || n.title));
       if (withUrl.length === 0) return;
 
-      // LLM filter: only keep market-relevant news, cap at 5
-      const relevant = await _filterForTrading(
-        withUrl.map(n => ({ ...n, text: n.headline || n.title })),
-        'news'
-      );
-      if (relevant.length === 0) return;
+      const PENDING_CAP = 15;
+      const pending = [];
+      for (const n of withUrl) {
+        if (seenDigestUrls.has(n.url)) continue;
+        pending.push(n);
+        if (pending.length >= PENDING_CAP) break;
+      }
+      if (pending.length === 0) return;
+
+      // LLM filter: only keep market-relevant news. Pass originals (not
+      // clones) so `_filterForTrading`'s `item.text || item.headline ||
+      // item.title` fallback picks up the headline without losing object
+      // identity — which lets us map filter output back to pending urls.
+      //
+      // Passthrough detection: when the LLM is unavailable, malformed, or
+      // otherwise returns the input array unchanged, `_filterForTrading`
+      // returns the SAME array reference. We check for that below to
+      // suppress dedup commit in passthrough mode — otherwise the digest
+      // would walk through the feed backlog instead of anchoring to the
+      // current top-5 headlines (hour 1 marks 1-5 seen, hour 2 sends 6-10,
+      // etc). Under passthrough we fall back to pre-v2 behavior: re-send
+      // the top items every hour. That repeats headlines when LLM is down,
+      // which is strictly no worse than the pre-v2 baseline.
+      const relevant = await _filterForTrading(pending, 'news');
+      const filterPassthrough = relevant === pending;
+      if (relevant.length === 0) {
+        // LLM said "none" explicitly (malformed replies now pass-through
+        // in _filterForTrading, so `[]` is a real rejection). Remember
+        // pending urls so we don't re-ask next hour.
+        _commitDigestUrls(pending.map(p => p.url));
+        return;
+      }
       const top = relevant.slice(0, 5);
+      const approvedSet = new Set(relevant);
 
       // Translate each headline individually for reliability
       const lines = ['📰 新闻摘要', ''];
+      const topUrls = [];
       for (const n of top) {
         const headline = n.headline || n.title || '';
         const translated = await _translate(headline);
         const region = n.region ? ` [${n.region}]` : '';
         lines.push(`📄 ${translated}${region}`);
         lines.push(`   ${n.source || ''} | ${n.url}`);
+        if (n.url) topUrls.push(n.url);
       }
       lines.push(`\n🕐 ${new Date().toISOString().slice(11, 16)} UTC`);
 
-      await _send(lines.join('\n'), 'news');
+      const result = await _send(lines.join('\n'), 'news');
+      // Commit dedup state only when ALL of the following are true:
+      //  - TG Bot API returned ok:true (not just HTTP 200 with ok:false,
+      //    which happens on validation errors like a stale topic id)
+      //  - The LLM filter actually discriminated (not passthrough mode)
+      //
+      // Under passthrough we intentionally fall back to pre-v2 "resend
+      // current top every hour" semantics rather than draining the feed.
+      if (result?.ok && !filterPassthrough) {
+        // Commit only (a) items we actually sent and (b) items the LLM
+        // explicitly rejected. LLM-approved items beyond the top-5 stay
+        // uncommitted so a ranking near-miss can be retried next hour.
+        const rejectedUrls = pending
+          .filter(p => !approvedSet.has(p))
+          .map(p => p.url);
+        _commitDigestUrls([...topUrls, ...rejectedUrls]);
+      }
     } catch (err) {
       _log.error('news_digest_failed', { module: 'dashboard', error: err.message });
     }
