@@ -152,7 +152,16 @@ export function createAgentBot({ config, agentLLM, history, executor, modelSelec
 
     // Auth check
     if (allowedChatId && chatId !== String(allowedChatId)) {
-      _log.warn('unauthorized_msg', { module: 'tg-bot', chatId });
+      // Include only chatId + thread so operators can identify the source
+      // topic when discovering forum topic IDs for a new dashboard
+      // supergroup. Deliberately do NOT persist msg.text or sender identity:
+      // unauthorized messages may contain mistyped secrets and storing them
+      // for 7 days creates an avoidable PII/secret retention path.
+      _log.warn('unauthorized_msg', {
+        module: 'tg-bot',
+        chatId,
+        thread: msg.message_thread_id ?? null,
+      });
       return;
     }
 
