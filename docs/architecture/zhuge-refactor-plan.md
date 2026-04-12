@@ -1,7 +1,17 @@
 # 诸葛架构重构计划
 
+> ⚠️ **DEPRECATED 2026-04-11** —— 本文档已被以下两份替代:
+> - `zhuge-os-kernel-plan.md`(Layer 0,role-agnostic kernel)
+> - `zhuge-trader-harness-plan.md`(Layer 1,trader 角色 + 业务优化)
+>
+> **为什么换**:本 plan 把 OS 工作和 trader 业务混在一起,接口设计带 trader 偏见,新增 AM 角色时要返工。重构后 kernel/harness 分层,role-agnostic。两份新 plan 中包含本文档全部条目的对应归属表(见 kernel plan 末尾"与父 plan 和 addendum 的关系"小节)。
+>
+> **历史地位**:本 plan 落地了 P0 exec_shell 加固(commit f372477),其余条目未实施。保留作为决策历史 + 演进起点。
+
+---
+
 更新时间: 2026-04-09
-状态: codex-reviewed, approved
+状态: codex-reviewed, approved → **deprecated 2026-04-11**
 依据: Anthropic Claude Managed Agents 工程实践 + AlexZ Agent OS 分析
 
 ## 背景
