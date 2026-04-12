@@ -3,7 +3,7 @@
  *   positions, balance, open_trade, close_trade, pause_trading, resume_trading
  */
 
-export function createTradeTools({ bitgetClient, bitgetExec, db, config }) {
+export function createTradeTools({ bitgetClient, bitgetExec, db, config, mandateGate }) {
   const { bitgetRequest } = bitgetClient;
 
   const TOOL_DEFS = [
@@ -107,13 +107,23 @@ export function createTradeTools({ bitgetClient, bitgetExec, db, config }) {
       const lev = leverage || config.MOMENTUM?.leverage || 10;
 
       try {
-        // This is a simplified version — full logic in bitget/executor.mjs
-        const holdSide = side === 'buy' ? 'long' : 'short';
-        const result = await bitgetExec.executeBitgetTrade({
+        const traceId = `tg_manual_${Date.now()}`;
+        const signal = {
           recommended_action: side === 'buy' ? 'strong_buy' : 'strong_sell',
           symbol: symbol.replace('USDT', ''),
           confidence: 80,
-        }, `tg_manual_${Date.now()}`);
+        };
+
+        // Mandate Gate check — hard rules apply to manual trades too
+        if (mandateGate) {
+          const mandate = await mandateGate.check(signal, traceId);
+          if (mandate.verdict === 'VETO') {
+            return `Mandate Gate VETO: ${mandate.reasons.join('; ')}`;
+          }
+        }
+
+        const holdSide = side === 'buy' ? 'long' : 'short';
+        const result = await bitgetExec.executeBitgetTrade(signal, traceId);
         return result ? JSON.stringify(result) : `已提交 ${symbol} ${holdSide} ${lev}x 开仓请求`;
       } catch (err) {
         return `Error: ${err.message}`;

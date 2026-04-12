@@ -1,33 +1,30 @@
 /**
- * Risk agent: hard rules + LLM-based soft evaluation.
+ * Risk agent: LLM-based soft evaluation only.
+ *
+ * 道枢坐标: (Harness, Philosophy)
+ * Hard rules have been extracted to mandate-gate.mjs (Harness, Keystone).
+ * This agent assumes mandate gate has already passed before being called.
  */
 
-export function createRiskAgent({ db, config, bitgetClient, bitgetWS, agentRunner, messageBus, log }) {
+export function createRiskAgent({ db, config, agentRunner, messageBus, log }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
-  const { bitgetRequest } = bitgetClient;
-  const _ws = bitgetWS || { isHealthy: () => false, getEquity: () => 0, getUnrealizedPnL: () => 0 };
   const { runAgent } = agentRunner;
   const { postMessage } = messageBus;
   const { insertDecision } = db;
 
-  const RISK_SYSTEM_PROMPT = `You are the RIFI Risk Agent. Your sole job is to review trade signals and decide PASS or VETO.
+  const RISK_SYSTEM_PROMPT = `You are the RIFI Risk Agent. Your job is to evaluate trade signals using soft judgment and decide PASS or VETO.
 
-You have tools to check the current portfolio state and trade history. Use them before deciding.
+IMPORTANT: Hard rules (24h loss limit, consecutive loss cooldown, exposure limits) have already been checked by the Mandate Gate before you run. You do NOT need to re-check those. Focus on soft judgment only.
 
-Hard rules (automatic VETO, non-negotiable):
-- 24h cumulative loss > 5% of portfolio → VETO
-- 3 consecutive losing trades → VETO (1h cooldown needed)
-- Account balance too low to execute → VETO
-
-Soft rules (use judgment):
+Soft rules (use your judgment):
 - Analyst confidence < 60 → lean toward VETO
 - Same direction position already open → warn, lean toward VETO unless strong signal
 - Signal conflicts with recent trade direction in last 1h → extra caution
 
 Your workflow:
-1. Call get_trade_stats to check recent performance
+1. Call get_trade_stats to check recent performance context
 2. Call get_recent_decisions to see what happened recently
-3. Evaluate the signal against rules
+3. Evaluate the signal using soft rules and your judgment
 4. Call submit_verdict with your decision. Do NOT output raw JSON text.`;
 
   const RISK_TOOLS = [
@@ -109,92 +106,13 @@ Your workflow:
     const now = new Date().toISOString();
     const isScout = opts.isScout || false;
 
-    // --- Hard rules (code-level, cannot be bypassed by LLM) ---
-
-    // Check consecutive losses — count by position_groups if scaling enabled, else by trades
-    // Scout positions skip this check (smallest position, worth trying even after losses)
-    let consecutiveLossCount = 0;
-    const SCALING = config.SCALING;
-    if (!isScout) {
-      if (SCALING?.enabled) {
-        const recentGroups = db.prepare("SELECT pnl, closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') ORDER BY closed_at DESC LIMIT 10").all();
-        for (const g of recentGroups) { if ((g.pnl || 0) < 0) consecutiveLossCount++; else break; }
-      } else {
-        const recentTrades = db.prepare("SELECT pnl FROM trades WHERE status = 'closed' AND (pnl IS NOT NULL AND pnl != 0) ORDER BY closed_at DESC LIMIT 10").all();
-        for (const t of recentTrades) { if (t.pnl < 0) consecutiveLossCount++; else break; }
-      }
-    }
-    const lossThresholdCount = SCALING?.enabled ? 5 : 3;
-    const consecutiveLosses = consecutiveLossCount >= lossThresholdCount;
-
-    // Check last loss time for cooldown (scouts skip)
-    if (consecutiveLosses && !isScout) {
-      const lastLossQuery = SCALING?.enabled
-        ? "SELECT closed_at FROM position_groups WHERE status IN ('closed', 'abandoned') AND pnl < 0 ORDER BY closed_at DESC LIMIT 1"
-        : "SELECT closed_at FROM trades WHERE status = 'closed' AND pnl < 0 ORDER BY closed_at DESC LIMIT 1";
-      const lastLoss = db.prepare(lastLossQuery).get();
-      if (lastLoss?.closed_at) {
-        const cooldownEnd = new Date(lastLoss.closed_at + 'Z').getTime() + 60 * 60 * 1000; // 1h
-        if (Date.now() < cooldownEnd) {
-          const reason = `连续${lossThresholdCount}笔亏损，冷却期至 ${new Date(cooldownEnd).toISOString().slice(11, 16)}`;
-          postMessage('risk', 'executor', 'VETO', { reason }, traceId);
-          return { pass: false, reason, risk_flags: ['consecutive_losses', 'cooldown_active'] };
-        }
-      }
-    }
-
-    // Check total active exposure across all symbols (scaling mode)
-    if (SCALING?.enabled) {
-      const activeGroups = db.prepare("SELECT total_size, symbol FROM position_groups WHERE status = 'active'").all();
-      const totalExposure = activeGroups.reduce((s, g) => s + (g.total_size || 0), 0);
-      if (totalExposure >= SCALING.max_exposure_eth) {
-        const reason = `总敞口 ${totalExposure.toFixed(4)} 已达上限 ${SCALING.max_exposure_eth}`;
-        return { pass: false, reason, risk_flags: ['max_exposure'] };
-      }
-    }
-
-    // Check 24h cumulative loss > 5% — includes realized + unrealized
-    const h24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const recent24h = db.prepare('SELECT pnl FROM trades WHERE status = ? AND closed_at > ?').all('closed', h24);
-    let loss24h = recent24h.reduce((s, t) => s + Math.min(0, t.pnl || 0), 0);
-    // Include unrealized PnL from open positions (floating losses count)
-    // Primary: WS cache (instant, no API call). Fallback: REST API.
-    let unrealizedLoss = 0;
-    if (_ws.isHealthy()) {
-      unrealizedLoss = Math.min(0, _ws.getUnrealizedPnL());
-    } else {
-      try {
-        const posData = await bitgetRequest('GET', '/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT');
-        const positions = Array.isArray(posData) ? posData : (posData?.list || []);
-        unrealizedLoss = positions.reduce((s, p) => s + Math.min(0, parseFloat(p.unrealizedPL || '0')), 0);
-      } catch (e) { _log.warn('unrealized_pnl_fetch_failed', { module: 'risk', error: e.message }); }
-    }
-    loss24h += unrealizedLoss;
-
-    // Dynamic threshold: 5% of account equity
-    // Primary: WS cache. Fallback: REST API.
-    let equity = _ws.isHealthy() ? _ws.getEquity() : 0;
-    if (equity <= 0) {
-      try {
-        const accts = await bitgetRequest('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES').catch(() => []);
-        equity = parseFloat((accts || []).find(a => a.marginCoin === 'USDT')?.accountEquity || '0');
-      } catch (e) { _log.warn('equity_fetch_failed', { module: 'risk', error: e.message }); }
-    }
-    const lossThreshold = equity > 0 ? equity * 0.05 : 0;
-    if (lossThreshold <= 0) {
-      _log.warn('equity_unknown_veto', { module: 'risk' });
-      return { pass: false, reason: '无法获取账户权益，暂停交易', risk_flags: ['equity_unknown'] };
-    }
-    if (loss24h < -lossThreshold) {
-      const reason = `24小时累计亏损 ${loss24h.toFixed(2)} USDC (含浮亏)，超过安全阈值 (${lossThreshold.toFixed(2)})`;
-      postMessage('risk', 'executor', 'VETO', { reason }, traceId);
-      return { pass: false, reason, risk_flags: ['24h_loss_limit'] };
-    }
+    // Hard rules are now in mandate-gate.mjs — caller must run mandateGate.check() first.
+    // This function only runs LLM soft judgment.
 
     // --- Soft rules: let Risk agent LLM evaluate ---
     // Scout positions use a relaxed prompt: lower confidence bar, ignore consecutive losses
     const scoutOverride = isScout
-      ? `\n\nIMPORTANT: This is a SCOUT position (smallest size, minimal risk). Be LENIENT:\n- Confidence >= 50 is acceptable (not 60)\n- Ignore consecutive loss history for scouts\n- Only VETO if there's a hard red flag (24h loss limit, extreme macro risk > 90)\n- Default to PASS unless clearly dangerous`
+      ? `\n\nIMPORTANT: This is a SCOUT position (smallest size, minimal risk). Be LENIENT:\n- Confidence >= 50 is acceptable (not 60)\n- Ignore consecutive loss history for scouts (hard cooldown already handled by Mandate Gate)\n- Only VETO if there's a clear soft red flag (extreme macro risk > 90, very low confidence)\n- Default to PASS unless clearly dangerous`
       : '';
     try {
       const result = await runAgent('risk', RISK_SYSTEM_PROMPT + scoutOverride, RISK_TOOLS, RISK_EXECUTORS,

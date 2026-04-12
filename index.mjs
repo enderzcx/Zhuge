@@ -14,6 +14,7 @@ import { createMessageBus } from './agents/message-bus.mjs';
 import { createAgentRunner } from './agents/runner.mjs';
 import { createAnalyst } from './agents/analyst.mjs';
 import { createRiskAgent } from './agents/risk.mjs';
+import { createMandateGate } from './agents/mandate-gate.mjs';
 import { createStrategist } from './agents/strategist.mjs';
 import { createReviewer } from './agents/reviewer.mjs';
 import { createResearcher } from './agents/researcher.mjs';
@@ -98,7 +99,8 @@ const lifi = createLiFi(config);
 const _ragRef = { instance: null };
 const _researcherRef = { instance: null };
 const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics, researcher: { researchCoin: (...a) => _researcherRef.instance?.researchCoin(...a) } });
-const riskAgent = createRiskAgent({ db, config, bitgetClient, bitgetWS, agentRunner, messageBus, log });
+const mandateGate = createMandateGate({ db, config, bitgetClient, bitgetWS, messageBus, log });
+const riskAgent = createRiskAgent({ db, config, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
   stock:  { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
@@ -172,7 +174,7 @@ const dataTools = createDataTools({
   intelStream, config,
   klineMonitor: { subscribe: (...a) => _klineRef.instance?.subscribe(...a), unsubscribe: (...a) => _klineRef.instance?.unsubscribe(...a), getStatus: () => _klineRef.instance?.getStatus?.() || [], getIndicators: (...a) => _klineRef.instance?.getIndicators(...a) },
 });
-const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config });
+const tradeTools = createTradeTools({ bitgetClient, bitgetExec, db, config, mandateGate });
 const memoryTools = createMemoryTools({ log, db });
 // Scheduler created after scanner/pipeline (uses getter pattern for late-binding)
 const _schedulerRef = { instance: null };
@@ -205,7 +207,7 @@ _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
 _alertRef.fn = (msg) => pushEngine.pushError({ source: 'health', message: msg }); // wire health alerts → TG
 
 // Create pipeline (after push engine)
-const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine, prom });
+const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, mandateGate, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine, prom });
 
 // Task Scheduler (agent-managed recurring jobs)
 const taskScheduler = createTaskScheduler({ db, pipeline, scanner, compound: agentCompound, log, metrics, pushEngine });

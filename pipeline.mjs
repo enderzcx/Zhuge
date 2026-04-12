@@ -8,7 +8,7 @@ import { context } from '@opentelemetry/api';
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
-export function createPipeline({ config, db, dataSources, analyst, riskAgent, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine, prom }) {
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, mandateGate, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine, prom }) {
 
   const { runAgent, agentMetrics } = agentRunner;
   const _metrics = metrics || { record() {} }; // fallback if not provided
@@ -16,8 +16,28 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, bi
   const log = _extLog || { info: _noop, warn: _noop, error: _noop, debug: _noop };
   const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
   const { runRiskCheck } = riskAgent;
+  const _mandateGate = mandateGate || { check: async () => ({ verdict: 'VETO', reasons: ['mandateGate not injected — fail-closed'], rule: 'missing_gate' }) };
   const { executeBitgetTrade, reconcileTargetPosition, openScoutPosition, scaleUpPosition, abandonPosition,
           checkScaleUpConditions, checkAbandonConditions } = bitgetExec;
+
+  /**
+   * Full risk check: Mandate Gate (Keystone) → LLM Risk Agent (Philosophy).
+   * Mandate Gate VETO cannot be overridden by LLM.
+   */
+  async function _fullRiskCheck(signal, traceId, opts = {}) {
+    const mandate = await _mandateGate.check(signal, traceId, opts);
+    if (mandate.verdict === 'VETO') {
+      log.warn('mandate_gate_veto', { module: 'pipeline', rule: mandate.rule, reasons: mandate.reasons });
+      const now = new Date().toISOString();
+      try {
+        insertDecision.run(now, 'mandate_gate', 'veto', '', '', JSON.stringify(mandate),
+          'Mandate Gate hard rule VETO', mandate.reasons.join('; '), '', 0, null);
+      } catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
+      return { pass: false, reason: mandate.reasons.join('; '), risk_flags: [mandate.rule || 'mandate_veto'] };
+    }
+    // Mandate passed → run LLM soft judgment
+    return runRiskCheck(signal, traceId, opts);
+  }
   const { runStrategistCheck } = strategist;
   const SCALING = config.SCALING;
   const { runReview, runWeeklyReview } = reviewer;
@@ -232,7 +252,7 @@ Output ONLY the JSON, no other text.`;
           const shouldTrade = parsed.push_worthy ||
             (parsed.confidence >= 75 && ['strong_buy', 'strong_sell'].includes(parsed.recommended_action));
           if (shouldTrade) {
-            const riskVerdict = await runRiskCheck(parsed, traceId);
+            const riskVerdict = await _fullRiskCheck(parsed, traceId);
             if (riskVerdict.pass) {
               executeBitgetTrade(parsed, traceId).catch(err => log.error('bitget_exec_error', { module: 'pipeline', error: err.message }));
               if (config.AUTO_TRADE_URL) {
@@ -284,7 +304,7 @@ Output ONLY the JSON, no other text.`;
               }
 
               if (trigger.action === 'target_position') {
-                const riskVerdict = await runRiskCheck({ ...parsed, ...trigger }, traceId);
+                const riskVerdict = await _fullRiskCheck({ ...parsed, ...trigger }, traceId);
                 if (riskVerdict.pass) {
                   reconcileTargetPosition(trigger, traceId).catch(err =>
                     log.error('strategy_target_reconcile_error', { module: 'pipeline', strategy: trigger.strategy_id, error: err.message })
@@ -307,7 +327,7 @@ Output ONLY the JSON, no other text.`;
                 params: trigger.params || {},
                 ...(trigger.params || {}), // flatten params for executor
               };
-              const riskVerdict = await runRiskCheck(tradeSignal, traceId);
+              const riskVerdict = await _fullRiskCheck(tradeSignal, traceId);
               if (riskVerdict.pass) {
                 executeBitgetTrade(tradeSignal, traceId).catch(err => log.error('strategy_trade_error', { module: 'pipeline', strategy: trigger.strategy_id, error: err.message }));
               } else {
@@ -537,7 +557,7 @@ ${summary}
       if (checkScaleUpConditions(activeGroup, signal, currentPrice)) {
         const nextLevel = activeGroup.current_level + 1;
         // Risk check before scaling up
-        const riskVerdict = await runRiskCheck(signal, traceId);
+        const riskVerdict = await _fullRiskCheck(signal, traceId);
         if (riskVerdict.pass) {
           const result = await scaleUpPosition(activeGroup, signal, traceId);
           if (result) {
@@ -554,7 +574,7 @@ ${summary}
 
       if (isDirectional && meetsConfidence) {
         // Risk check before opening scout (relaxed rules for smallest position)
-        const riskVerdict = await runRiskCheck(signal, traceId, { isScout: true });
+        const riskVerdict = await _fullRiskCheck(signal, traceId, { isScout: true });
         if (riskVerdict.pass) {
           const result = await openScoutPosition(symbol, signal, traceId);
           if (result) {
