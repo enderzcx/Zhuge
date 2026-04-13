@@ -517,6 +517,21 @@ export function createDB({ log } = {}) {
       UNIQUE(target_id, rung_index, intent)
     );
     CREATE INDEX IF NOT EXISTS idx_strategy_ladder_status ON strategy_ladder_orders(status, bitget_order_id, target_id);
+
+    -- Kernel Event Store: append-only event log for OS kernel
+    CREATE TABLE IF NOT EXISTS kernel_events (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      trace_id TEXT,
+      parent_id TEXT,
+      payload TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_ke_type_ts ON kernel_events(type, ts);
+    CREATE INDEX IF NOT EXISTS idx_ke_trace ON kernel_events(trace_id);
+    CREATE INDEX IF NOT EXISTS idx_ke_actor_ts ON kernel_events(actor, ts);
   `);
 
   const insertNews = db.prepare(`
