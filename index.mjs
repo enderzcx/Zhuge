@@ -15,6 +15,8 @@ import { createAgentRunner } from './agents/runner.mjs';
 import { createAnalyst } from './agents/analyst.mjs';
 import { createRiskAgent } from './agents/risk.mjs';
 import { createMandateGate } from './agents/mandate-gate.mjs';
+import { createMandateGate as createKernelMandateGate } from './kernel/mandate/gate.mjs';
+import { loadTraderMandate, buildMandateContext } from './harness/trader/mandate.mjs';
 import { createStrategist } from './agents/strategist.mjs';
 import { createReviewer } from './agents/reviewer.mjs';
 import { createResearcher } from './agents/researcher.mjs';
@@ -100,6 +102,9 @@ const _ragRef = { instance: null };
 const _researcherRef = { instance: null };
 const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics, researcher: { researchCoin: (...a) => _researcherRef.instance?.researchCoin(...a) } });
 const mandateGate = createMandateGate({ db, config, bitgetClient, bitgetWS, messageBus, log });
+// Kernel mandate gate (shadow mode — runs alongside old gate for validation)
+const kernelMandateGate = createKernelMandateGate();
+loadTraderMandate(kernelMandateGate);
 const riskAgent = createRiskAgent({ db, config, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
@@ -207,7 +212,7 @@ _pushRef.engine = pushEngine; // wire into dataTools + promptLoader via getter
 _alertRef.fn = (msg) => pushEngine.pushError({ source: 'health', message: msg }); // wire health alerts → TG
 
 // Create pipeline (after push engine)
-const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, mandateGate, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine, prom });
+const pipeline = createPipeline({ config, db, dataSources, analyst, riskAgent, mandateGate, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log, pushEngine, prom, kernelMandateGate, bitgetClient, bitgetWS });
 
 // Task Scheduler (agent-managed recurring jobs)
 const taskScheduler = createTaskScheduler({ db, pipeline, scanner, compound: agentCompound, log, metrics, pushEngine });

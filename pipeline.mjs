@@ -5,10 +5,11 @@
 
 import { startRootSpan, withSpan, endSpan } from './agent/observe/tracing.mjs';
 import { context } from '@opentelemetry/api';
+import { buildMandateContext } from './harness/trader/mandate.mjs';
 
 const PATROL_INTERVAL = 12; // 12 * 15min = 3h
 
-export function createPipeline({ config, db, dataSources, analyst, riskAgent, mandateGate, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine, prom }) {
+export function createPipeline({ config, db, dataSources, analyst, riskAgent, mandateGate, bitgetExec, strategist, reviewer, priceStream, scanner, signals, telegram, agentRunner, cache, messageBus, llm, metrics, log: _extLog, pushEngine, prom, kernelMandateGate, bitgetClient, bitgetWS }) {
 
   const { runAgent, agentMetrics } = agentRunner;
   const _metrics = metrics || { record() {} }; // fallback if not provided
@@ -26,6 +27,22 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, ma
    */
   async function _fullRiskCheck(signal, traceId, opts = {}) {
     const mandate = await _mandateGate.check(signal, traceId, opts);
+
+    // --- Kernel mandate shadow check (log-only, non-blocking) ---
+    if (kernelMandateGate) {
+      try {
+        const kCtx = await buildMandateContext({ db: db.db || db, config, bitgetClient, bitgetWS, isScout: opts.isScout, log });
+        const kVerdict = kernelMandateGate.check('trader', 'open_trade', kCtx);
+        const oldPass = mandate.verdict === 'PASS';
+        if (kVerdict.pass !== oldPass) {
+          log.error('mandate_mismatch', { module: 'pipeline', old: mandate.verdict, kernel: kVerdict.pass ? 'PASS' : 'VETO', kernel_rule: kVerdict.vetoed_by?.id, old_rule: mandate.rule, ctx: kCtx });
+        }
+      } catch (e) {
+        log.warn('kernel_mandate_shadow_error', { module: 'pipeline', error: e.message });
+      }
+    }
+    // --- End shadow check ---
+
     if (mandate.verdict === 'VETO') {
       log.warn('mandate_gate_veto', { module: 'pipeline', rule: mandate.rule, reasons: mandate.reasons });
       const now = new Date().toISOString();
