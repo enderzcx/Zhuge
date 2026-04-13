@@ -17,7 +17,7 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, ma
   const log = _extLog || { info: _noop, warn: _noop, error: _noop, debug: _noop };
   const { buildAnalystSystemPrompt, ANALYST_TOOLS, ANALYST_EXECUTORS } = analyst;
   const { runRiskCheck } = riskAgent;
-  const _mandateGate = mandateGate || { check: async () => ({ verdict: 'VETO', reasons: ['mandateGate not injected — fail-closed'], rule: 'missing_gate' }) };
+  // Old mandateGate no longer used — kernel mandate gate is primary (via kernelMandateGate + buildMandateContext)
   const { executeBitgetTrade, reconcileTargetPosition, openScoutPosition, scaleUpPosition, abandonPosition,
           checkScaleUpConditions, checkAbandonConditions } = bitgetExec;
 
@@ -26,31 +26,20 @@ export function createPipeline({ config, db, dataSources, analyst, riskAgent, ma
    * Mandate Gate VETO cannot be overridden by LLM.
    */
   async function _fullRiskCheck(signal, traceId, opts = {}) {
-    const mandate = await _mandateGate.check(signal, traceId, opts);
+    // --- Kernel Mandate Gate (primary) ---
+    const kCtx = await buildMandateContext({ db: db.db || db, config, bitgetClient, bitgetWS, isScout: opts.isScout, log });
+    const mandate = kernelMandateGate.check('trader', 'open_trade', kCtx);
 
-    // --- Kernel mandate shadow check (log-only, non-blocking) ---
-    if (kernelMandateGate) {
-      try {
-        const kCtx = await buildMandateContext({ db: db.db || db, config, bitgetClient, bitgetWS, isScout: opts.isScout, log });
-        const kVerdict = kernelMandateGate.check('trader', 'open_trade', kCtx);
-        const oldPass = mandate.verdict === 'PASS';
-        if (kVerdict.pass !== oldPass) {
-          log.error('mandate_mismatch', { module: 'pipeline', old: mandate.verdict, kernel: kVerdict.pass ? 'PASS' : 'VETO', kernel_rule: kVerdict.vetoed_by?.id, old_rule: mandate.rule, ctx: kCtx });
-        }
-      } catch (e) {
-        log.warn('kernel_mandate_shadow_error', { module: 'pipeline', error: e.message });
-      }
-    }
-    // --- End shadow check ---
-
-    if (mandate.verdict === 'VETO') {
-      log.warn('mandate_gate_veto', { module: 'pipeline', rule: mandate.rule, reasons: mandate.reasons });
+    if (!mandate.pass) {
+      const rule = mandate.vetoed_by?.id || 'mandate_veto';
+      const reason = mandate.vetoed_by?.message || 'Mandate VETO';
+      log.warn('mandate_gate_veto', { module: 'pipeline', rule, reason });
       const now = new Date().toISOString();
       try {
         insertDecision.run(now, 'mandate_gate', 'veto', '', '', JSON.stringify(mandate),
-          'Mandate Gate hard rule VETO', mandate.reasons.join('; '), '', 0, null);
+          'Kernel Mandate Gate hard rule VETO', reason, '', 0, null);
       } catch (e) { log.warn('decision_insert_failed', { module: 'pipeline', error: e.message }); }
-      return { pass: false, reason: mandate.reasons.join('; '), risk_flags: [mandate.rule || 'mandate_veto'] };
+      return { pass: false, reason, risk_flags: [rule] };
     }
     // Mandate passed → run LLM soft judgment
     return runRiskCheck(signal, traceId, opts);
