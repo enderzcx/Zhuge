@@ -24,3 +24,9 @@ export {
   toAnthropicMessages, toAnthropicTools,
   fromAnthropicToolUse, toAnthropicToolResult, fromAnthropicResponse,
 } from './capability/adapters/anthropic.mjs';
+
+// Sprint 3
+export { createScheduler } from './scheduler/index.mjs';
+export { createObservability } from './observability/index.mjs';
+export { createLifecycle } from './lifecycle/retention.mjs';
+export { createSandbox } from './sandbox/index.mjs';
