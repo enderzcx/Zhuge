@@ -135,7 +135,7 @@ const strategist = createStrategist({
 const telegram = createTelegram({ db, config, agentMetrics: agentRunner.agentMetrics, cache });
 const reviewer = createReviewer({ db, config, agentRunner, messageBus, telegram, log });
 // reviewer created first so checkAndSyncTrades can trigger lesson generation after trade close
-const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messageBus, reviewer, log, metrics });
+const bitgetExec = createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messageBus, reviewer, log, metrics, pushEngine: { pushTrade: (...a) => _pushRef.engine?.pushTrade?.(...a) } });
 const researcher = createResearcher({ db, config, bitgetClient, agentRunner, indicators, dataSources, log });
 _researcherRef.instance = researcher;
 const _compoundRef = { instance: null };

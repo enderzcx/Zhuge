@@ -2,11 +2,13 @@
  * Bitget trade executor: mutex lock + order placement + trade sync.
  */
 
-export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messageBus, reviewer, log, metrics }) {
+export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messageBus, reviewer, log, metrics, pushEngine }) {
   const _log = log || { info: console.log, warn: console.warn, error: console.error };
   const { bitgetRequest, roundPrice } = bitgetClient;
   const _ws = bitgetWS || { isHealthy: () => false, getEquity: () => 0, getAvailable: () => 0 };
   const { postMessage } = messageBus;
+  // pushEngine injected via getter pattern (created after executor)
+  const _push = pushEngine || { pushTrade: () => {} };
   const { insertTrade, insertDecision, updateTradeClose,
           insertPositionGroup, insertPositionLevel, updatePositionGroup, closePositionGroup,
           getActiveGroup, getGroupLevels, getLastAbandonedTime,
@@ -512,6 +514,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
       const priceInfo = useLimit ? `@ ${orderParams.price}` : '@ market';
       _log.info('trade_opened', { module: 'bitget_exec', holdSide, size, symbol, leverage, orderType, priceInfo, confidence, sl: signal.stop_loss || '-', tp: signal.take_profit || '-', orderId });
       metrics?.record('trade_execution', 1, { symbol, side, orderType });
+      _push.pushTrade?.({ action: 'open', symbol, side: holdSide, leverage, price: useLimit ? parseFloat(orderParams.price) : 0, traceId }).catch(() => {});
 
       // Record trade
       const tradeIdStr = `bg_${orderId}`;
@@ -664,6 +667,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
           updateTradeClose.run(exitPrice, pnl, pnlPct, new Date().toISOString(), trade.trade_id);
           const sign = pnl >= 0 ? '+' : '';
           _log.info('trade_closed', { module: 'trade_sync', tradeId: trade.trade_id, entryPrice, exitPrice, pnl: pnl.toFixed(4), pnlPct: pnlPct.toFixed(2) });
+          _push.pushTrade?.({ action: 'close', symbol: trade.pair, side: trade.side, price: exitPrice, pnl }).catch(() => {});
 
           // Trigger reviewer to generate lesson from this closed trade
           if (reviewer) {
@@ -792,6 +796,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
       _log.info('scout_opened', { module: 'scout', level: 0, holdSide, size: sizeStr, symbol, orderId, stopLoss });
       metrics?.record('trade_execution', 1, { symbol, side, orderType: 'market' });
+      _push.pushTrade?.({ action: 'open', symbol, side: holdSide, leverage, price: fillPrice, traceId }).catch(() => {});
 
       // Record in trades table (backward compat)
       const tradeId = `bg_${orderId}`;
@@ -1123,6 +1128,7 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
 
           updateTradeClose.run(fill.fillPrice, pnl, pnlPct, new Date().toISOString(), openTrade.trade_id);
           _log.info('ws_trade_closed', { module: 'ws_handler', tradeId: openTrade.trade_id, exitPrice: fill.fillPrice, pnl: pnl.toFixed(4) });
+          _push.pushTrade?.({ action: 'close', symbol: openTrade.pair, side: openTrade.side, price: fill.fillPrice, pnl }).catch(() => {});
         }
 
         if (ladderOrder) {
