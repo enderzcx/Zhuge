@@ -532,6 +532,32 @@ export function createDB({ log } = {}) {
     CREATE INDEX IF NOT EXISTS idx_ke_type_ts ON kernel_events(type, ts);
     CREATE INDEX IF NOT EXISTS idx_ke_trace ON kernel_events(trace_id);
     CREATE INDEX IF NOT EXISTS idx_ke_actor_ts ON kernel_events(actor, ts);
+
+    -- Kernel Memory API: persistent memory store
+    CREATE TABLE IF NOT EXISTS kernel_memories (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      key TEXT,
+      content TEXT NOT NULL,
+      type TEXT DEFAULT 'note',
+      importance REAL DEFAULT 0.5,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      archived INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_km_scope_key ON kernel_memories(scope, key);
+    CREATE INDEX IF NOT EXISTS idx_km_scope ON kernel_memories(scope, archived);
+    CREATE INDEX IF NOT EXISTS idx_km_type ON kernel_memories(type, archived);
+
+    -- Kernel Sessions: event-sourced conversation metadata
+    CREATE TABLE IF NOT EXISTS kernel_sessions (
+      id TEXT PRIMARY KEY,
+      owner TEXT NOT NULL,
+      metadata_json TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now')),
+      archived INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ks_owner ON kernel_sessions(owner, archived);
   `);
 
   const insertNews = db.prepare(`

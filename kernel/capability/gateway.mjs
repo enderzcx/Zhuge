@@ -67,7 +67,7 @@ function validateInput(input, schema) {
  * }} deps
  * @returns {CapabilityGateway}
  */
-export function createCapabilityGateway({ registry, eventStore, log }) {
+export function createCapabilityGateway({ registry, eventStore, mandateGate, log }) {
   const _log = log || { info() {}, warn() {}, error() {} };
 
   /**
@@ -93,6 +93,30 @@ export function createCapabilityGateway({ registry, eventStore, log }) {
       const err = `Validation failed for '${name}': ${errors.join(', ')}`;
       _log.warn('capability_validation_failed', { name, errors });
       throw new Error(err);
+    }
+
+    // Mandate gate check (if capability requires it and gate is available)
+    if (cap.mandate_check && mandateGate) {
+      // Derive harness name from capability namespace (e.g. 'trader.open_position' → 'trader')
+      const harnessName = name.includes('.') ? name.split('.')[0] : 'default';
+      const action = name.includes('.') ? name.split('.').slice(1).join('.') : name;
+      const mandateCtx = { ...input, action, ...(ctx.mandate_context || {}) };
+      const verdict = mandateGate.check(harnessName, action, mandateCtx);
+      if (!verdict.pass) {
+        const err = `Mandate VETO on '${name}': ${verdict.vetoed_by?.message || 'blocked'}`;
+        _log.warn('mandate_veto', { name, rule: verdict.vetoed_by?.id });
+        if (eventStore) {
+          try {
+            eventStore.emit({
+              type: 'mandate.veto',
+              actor: ctx.actor || 'gateway',
+              trace_id: ctx.trace_id,
+              payload: { name, rule_id: verdict.vetoed_by?.id, message: verdict.vetoed_by?.message },
+            });
+          } catch {}
+        }
+        throw new Error(err);
+      }
     }
 
     // Execute (default to {} for handler convenience)
