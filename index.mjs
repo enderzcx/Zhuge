@@ -230,10 +230,25 @@ registerMarketRoutes(app, { db, priceStream });
 registerBitgetRoutes(app, { bitgetClient, log });
 registerLiFiRoutes(app, lifi);
 
-// --- Prometheus metrics endpoint ---
+// --- Prometheus metrics endpoint (on main app, localhost only) ---
 app.get('/metrics', async (req, res) => {
   res.set('Content-Type', prom.contentType);
   res.end(await prom.metricsText());
+});
+
+// --- External metrics server (0.0.0.0:9464, for Prometheus remote scrape) ---
+import http from 'http';
+const metricsServer = http.createServer(async (req, res) => {
+  if (req.url === '/metrics') {
+    res.writeHead(200, { 'Content-Type': prom.contentType });
+    res.end(await prom.metricsText());
+  } else {
+    res.writeHead(404);
+    res.end('Not found');
+  }
+});
+metricsServer.listen(9464, '0.0.0.0', () => {
+  log.info('metrics_server_started', { module: 'index', port: 9464, host: '0.0.0.0' });
 });
 
 // --- K-line Monitor (real-time 5m/15m/1h indicator computation + signal detection) ---
