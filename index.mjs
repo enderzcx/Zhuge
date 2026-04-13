@@ -17,6 +17,13 @@ import { createRiskAgent } from './agents/risk.mjs';
 import { createMandateGate } from './agents/mandate-gate.mjs';
 import { createMandateGate as createKernelMandateGate } from './kernel/mandate/gate.mjs';
 import { loadTraderMandate, buildMandateContext } from './harness/trader/mandate.mjs';
+import { createCapabilityRegistry } from './kernel/capability/registry.mjs';
+import { createCapabilityGateway } from './kernel/capability/gateway.mjs';
+import { createEventStore } from './kernel/event-store/index.mjs';
+import { createScheduler } from './kernel/scheduler/index.mjs';
+import { registerAllTraderCapabilities } from './harness/trader/capabilities/register-all.mjs';
+import { createKernelToolAdapter } from './harness/trader/capabilities/adapter.mjs';
+import { registerTraderTasks, wireTraderCallbacks } from './harness/trader/orchestration.mjs';
 import { createStrategist } from './agents/strategist.mjs';
 import { createReviewer } from './agents/reviewer.mjs';
 import { createResearcher } from './agents/researcher.mjs';
@@ -102,9 +109,13 @@ const _ragRef = { instance: null };
 const _researcherRef = { instance: null };
 const analyst = createAnalyst({ db, config, bitgetClient, dataSources, priceStream, indicators, rag: { search: (...a) => _ragRef.instance?.search(...a) || [] }, metrics, researcher: { researchCoin: (...a) => _researcherRef.instance?.researchCoin(...a) } });
 const mandateGate = createMandateGate({ db, config, bitgetClient, bitgetWS, messageBus, log });
-// Kernel mandate gate (shadow mode — runs alongside old gate for validation)
+// --- Kernel OS primitives ---
 const kernelMandateGate = createKernelMandateGate();
 loadTraderMandate(kernelMandateGate);
+const kernelEventStore = createEventStore({ db: db.db });
+const kernelRegistry = createCapabilityRegistry();
+const kernelGateway = createCapabilityGateway({ registry: kernelRegistry, eventStore: kernelEventStore, mandateGate: kernelMandateGate, log });
+const kernelScheduler = createScheduler({ eventStore: kernelEventStore, log });
 const riskAgent = createRiskAgent({ db, config, agentRunner, messageBus, log });
 const cache = {
   crypto: { analysis: null, lastUpdate: null, analyzing: false, patrolHistory: [], patrolCounter: 0 },
@@ -190,15 +201,20 @@ toolRegistry.registerAll([...systemTools.TOOL_DEFS, ...dataTools.TOOL_DEFS, ...t
 const toolExecutor = createToolExecutor({ registry: toolRegistry, log, metrics });
 toolExecutor.registerExecutors({ ...systemTools.EXECUTORS, ...dataTools.EXECUTORS, ...tradeTools.EXECUTORS, ...memoryTools.EXECUTORS, ...scheduleTools.EXECUTORS, ...tvTools.EXECUTORS });
 
+// --- Kernel capability adapter (wraps toolExecutor with kernel gateway) ---
+registerAllTraderCapabilities(kernelRegistry, { dataTools, tradeTools, memoryTools, scheduleTools, systemTools, tradingviewTools: tvTools });
+const kernelAdapter = createKernelToolAdapter({ gateway: kernelGateway, registry: kernelRegistry, oldExecutor: toolExecutor, oldRegistry: toolRegistry, log });
+log.info('kernel_capabilities_registered', { module: 'index', count: kernelRegistry.size() });
+
 const promptLoader = createPromptLoader({
   db: db.db,
   pushEngine: { getRecentContext: (...a) => _pushRef.engine?.getRecentContext(...a) || [] },
   dataSources,
   klineMonitor: { getStatus: () => _klineRef.instance?.getStatus?.() || [] },
 });
-const confirmHandler = createConfirmHandler({ tgCall: null, executor: toolExecutor, history: agentHistory, log }); // tgCall set after bot creation
+const confirmHandler = createConfirmHandler({ tgCall: null, executor: kernelAdapter, history: agentHistory, log }); // tgCall set after bot creation
 const agentBot = createAgentBot({
-  config, agentLLM, history: agentHistory, executor: toolExecutor,
+  config, agentLLM, history: agentHistory, executor: kernelAdapter,
   modelSelector, buildSystemPrompt: promptLoader.buildSystemPrompt,
   confirmHandler, log, metrics,
 });
@@ -266,78 +282,25 @@ priceStream.setAnomalyHandler((anomaly) => {
 
 // --- Start ---
 app.listen(config.PORT, '127.0.0.1', () => {
-  log.info('server_started', { module: 'index', port: config.PORT, host: '127.0.0.1', model: config.LLM_MODEL, interval: '30min' });
-  // AI-driven scheduling: analyst decides next_check_in after each analysis
-  async function runAnalysisLoop() {
-    try {
-      const nextMin = await pipeline.collectAndAnalyze();
-      const nextMs = (nextMin || 30) * 60 * 1000;
-      log.info('next_analysis_scheduled', { module: 'index', nextMin: nextMin || 30, reason: 'ai_decided' });
-      setTimeout(runAnalysisLoop, nextMs);
-    } catch (err) {
-      log.error('analysis_loop_error', { module: 'index', error: err.message });
-      setTimeout(runAnalysisLoop, 30 * 60 * 1000); // fallback 30min on error
-    }
-    scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
-  }
-  runAnalysisLoop();
-  // Bitget Private WebSocket: register callbacks BEFORE connect to avoid missing early events
+  log.info('server_started', { module: 'index', port: config.PORT, host: '127.0.0.1', model: config.LLM_MODEL, interval: 'kernel_scheduler' });
+
+  // --- Kernel Scheduler: replaces all inline setTimeout/setInterval loops ---
+  registerTraderTasks({ scheduler: kernelScheduler, eventStore: kernelEventStore, pipeline, scanner, bitgetExec, bitgetWS, compound: agentCompound, cache, log });
+  wireTraderCallbacks({ scheduler: kernelScheduler, eventStore: kernelEventStore, bitgetWS, intelStream, pushEngine, cache, config, log });
+  kernelScheduler.start();
+  // Trigger first analysis cycle immediately
+  kernelScheduler.triggerAsync('trader.analysis_cycle');
+
+  // Bitget Private WebSocket: register callbacks BEFORE connect
   bitgetWS.onOrderFill((fill) => bitgetExec.handleOrderFill?.(fill));
   bitgetWS.onPositionClose((pos) => bitgetExec.handlePositionClose?.(pos));
-
-  // --- Floating loss monitor: react to drawdown in real-time ---
-  let _lastDrawdownAlert = 0;
-  bitgetWS.onPositionUpdate((positions) => {
-    if (!bitgetWS.isHealthy()) return;
-    const equity = bitgetWS.getEquity();
-    if (equity <= 0) return;
-    const totalPnL = bitgetWS.getUnrealizedPnL();
-    const lossPct = -totalPnL / equity; // positive when losing
-
-    // 5% threshold: FLASH alert (risk agent already blocks new trades at this level)
-    if (lossPct >= 0.05 && Date.now() - _lastDrawdownAlert > 5 * 60 * 1000) {
-      _lastDrawdownAlert = Date.now();
-      log.error('drawdown_critical', { module: 'index', totalPnL: totalPnL.toFixed(2), equity: equity.toFixed(2), lossPct: (lossPct * 100).toFixed(1) });
-      pushEngine?.pushError?.({ source: 'risk_monitor', message: `浮亏 ${totalPnL.toFixed(2)} USDT (${(lossPct * 100).toFixed(1)}% 权益)，已触发紧急分析` });
-      pipeline.collectAndAnalyze().catch(e => log.error('emergency_analysis_error', { module: 'index', error: e.message }));
-    }
-    // 3% threshold: trigger instant analysis cycle
-    else if (lossPct >= 0.03 && Date.now() - _lastDrawdownAlert > 5 * 60 * 1000) {
-      _lastDrawdownAlert = Date.now();
-      log.warn('drawdown_warning', { module: 'index', totalPnL: totalPnL.toFixed(2), equity: equity.toFixed(2), lossPct: (lossPct * 100).toFixed(1) });
-      pipeline.collectAndAnalyze().catch(e => log.error('drawdown_analysis_error', { module: 'index', error: e.message }));
-    }
-  });
-
   bitgetWS.connect();
 
-  // --- Intel Stream: TG channels + Twitter/X + free APIs (replaces old news flash polling) ---
-  intelStream.setTriggerHandler((item) => {
-    // Overlap guard: skip if last analysis was < 10 min ago or currently analyzing
-    const lastAnalysis = cache.crypto.lastUpdate ? new Date(cache.crypto.lastUpdate).getTime() : 0;
-    if (Date.now() - lastAnalysis < 10 * 60 * 1000) return;
-    if (cache.crypto.analyzing) return;
-    log.info('intel_flash_trigger', { module: 'intel', title: (item.title || '').slice(0, 80), score: item.score, source: item.source });
-    pipeline.collectAndAnalyze().catch(e => log.error('intel_trigger_error', { module: 'intel', error: e.message }));
-  });
-  if (config.INTEL?.enabled) {
-    intelStream.start().catch(e => log.error('intel_start_error', { module: 'intel', error: e.message }));
-  } else {
-    // Fallback: start API pollers only (no TG/X, but still better than nothing)
-    intelStream.start().catch(e => log.error('intel_start_error', { module: 'intel', error: e.message }));
+  // Intel stream start
+  intelStream.start().catch(e => log.error('intel_start_error', { module: 'intel', error: e.message }));
+  if (!config.INTEL?.enabled) {
     log.warn('intel_degraded_mode', { module: 'intel', reason: 'TG_API_ID not set, running API pollers only' });
   }
-
-  // Adaptive REST fallback sync: 5min when WS unhealthy, 30min when healthy
-  function scheduleTradeSync() {
-    const interval = bitgetWS.isHealthy() ? 30 * 60 * 1000 : 5 * 60 * 1000;
-    setTimeout(() => {
-      bitgetExec.checkAndSyncTrades().catch(e => log.error('trade_sync_error', { module: 'index', error: e.message }));
-      scanner.reviewPendingOrders().catch(e => log.error('pending_review_error', { module: 'index', error: e.message }));
-      scheduleTradeSync();
-    }, interval);
-  }
-  scheduleTradeSync();
   // OKX WebSocket removed — price ticks now come from Bitget public WS via kline-monitor
 
   // Start TG bot
