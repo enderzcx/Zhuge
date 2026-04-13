@@ -762,14 +762,15 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
         }
       } catch (e) { _log.warn('position_check_failed', { module: 'scout', error: e.message }); }
 
-      // Calculate sizes — ensure minimum notional value of $5 (Bitget requirement)
+      // Calculate sizes — ensure minimum order quantity per Bitget instrument rules
       const maxKelly = _calcMaxKellySize(available, symbol);
       const price = _getSymbolPrice(symbol);
-      const minNotional = 5; // Bitget minTradeUSDT = $5 for all USDT futures
-      const minSizeByNotional = price > 0 ? minNotional / price : 0.01;
-      // Round up to sizeMultiplier (0.0001 for BTC, 0.01 for ETH, 0.1 for SOL, etc.)
+      // Bitget minimum order sizes (by contract, not notional):
+      // BTC=0.001, ETH=0.01, SOL/BNB=0.1, most alts=1
+      const MIN_SIZES = { BTCUSDT: 0.001, ETHUSDT: 0.01, SOLUSDT: 0.1, BNBUSDT: 0.1 };
+      const minSizeByInstrument = MIN_SIZES[symbol] || (price > 100 ? 0.01 : price > 10 ? 0.1 : 1);
       const kellySize = _calcLevelSize(0, maxKelly);
-      const scoutSize = Math.max(minSizeByNotional, kellySize);
+      const scoutSize = Math.max(minSizeByInstrument, kellySize);
       // Round to 4 decimal places to avoid Bitget precision errors
       const sizeStr = String(parseFloat(scoutSize.toFixed(4)));
 
@@ -864,8 +865,9 @@ export function createBitgetExecutor({ db, config, bitgetClient, bitgetWS, messa
     try {
       const nextLevel = group.current_level + 1;
       const price = _getSymbolPrice(group.symbol);
-      const minSizeByNotional = price > 0 ? 5 / price : 0.01;
-      const size = Math.max(minSizeByNotional, _calcLevelSize(nextLevel, group.max_kelly_size));
+      const MIN_SIZES = { BTCUSDT: 0.001, ETHUSDT: 0.01, SOLUSDT: 0.1, BNBUSDT: 0.1 };
+      const minSize = MIN_SIZES[group.symbol] || (price > 100 ? 0.01 : price > 10 ? 0.1 : 1);
+      const size = Math.max(minSize, _calcLevelSize(nextLevel, group.max_kelly_size));
       const sizeStr = String(size);
       const side = group.side === 'long' ? 'buy' : 'sell';
       const holdSide = group.side;
